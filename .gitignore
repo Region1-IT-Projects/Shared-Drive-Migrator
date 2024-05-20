@@ -5,6 +5,7 @@ __pycache__/
 
 hvrhs-worker.json
 region1-worker.json
+*.asc
 
 # C extensions
 *.so
