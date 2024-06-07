@@ -1,3 +1,5 @@
+import uuid
+
 import googleapiclient.discovery as gdiscover
 import logging
 import googleapiclient.schema
@@ -63,9 +65,25 @@ class User:
         return file_list
 
 
-def build_dirs(dr, folders: list) -> Dir:
-    root = Dir(dr['id'], dr['root'], None)
-    return root
+def new_drive(target: Org, name: str):
+    params = {"name": name, "themeId": "abacus"}
+    # TODO: add source user as member of target drive
+    ret = target.API.drives().create(requestId=uuid.uuid1().hex, body=params).execute()
+    return ret['id']
+
+class Context:
+    def __init__(self, user: User, src_id: str, targ_id: str):
+        self.user = user
+        self.src_id = src_id
+        self.targ_id = targ_id
+        self.known_folders = set()
+        self.folder_map = {src_id: targ_id}
+        self.known_folders.add(src_id)
+
+def add_file(file: dict, context: Context):
+    if file['id'] in context.known_folders: # current file is a folder and already exists
+        return
+    if file['parents'] in context.known_folders:
 
 
 def migrate_user(user: User):
@@ -74,14 +92,11 @@ def migrate_user(user: User):
             print("Skipping drive '{}' as it has already been migrated".format(dr['name']))
             continue
         finished_drives.add(dr['id'])
-
+        targ_id = new_drive(target=user.dst, name=dr['name'])
         file_pile = user.get_all_drive_files(dr['id'])  # returns files AND Directories in a jumble
-        # build directory structure
-        folders = []
+        context = Context(user, dr['id'], targ_id)
         for i in file_pile:
-            if i['mimeType'] == 'application/vnd.google-apps.folder':
-                folders.append(i)
-        drive_root = build_dirs(dr, folders)
+            add_file(i, context)
 
     pass
 
