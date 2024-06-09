@@ -17,6 +17,7 @@ SCOPE_LIST = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.c
 INTERACTIVE = True
 USER_CSV = ""
 AUTO_ACCEPT = False
+VERBOSE = True
 
 finished_drives = set()
 
@@ -65,53 +66,91 @@ class User:
         return file_list
 
 
-def new_drive(target: Org, name: str):
+# Generates the body for a permissions create request
+def add_user_body(email: str, role: str = "writer"):
+    return {
+        "emailAddress": email,
+        "role": role,
+        "type": "user"
+    }
+
+
+def new_drive(target: Org, name: str) -> str:
     params = {"name": name, "themeId": "abacus"}
-    # TODO: add source user as member of target drive
     ret = target.API.drives().create(requestId=uuid.uuid1().hex, body=params).execute()
     return ret['id']
-
-class Context:
-    def __init__(self, user: User, src_id: str, targ_id: str):
-        self.user = user
-        self.src_id = src_id
-        self.targ_id = targ_id
-        self.known_folders = set()
-        self.folder_map = {src_id: targ_id}
-        self.known_folders.add(src_id)
-
-def add_file(file: dict, context: Context):
-    if file['id'] in context.known_folders: # current file is a folder and already exists
-        return
-    if file['parents'] in context.known_folders:
 
 
 def migrate_user(user: User):
     for dr in user.team_drives:
+        # TODO: only do this part if user is owner of drive
         if dr['id'] in finished_drives:
             print("Skipping drive '{}' as it has already been migrated".format(dr['name']))
             continue
-        finished_drives.add(dr['id'])
+        # create drive in destination org
         targ_id = new_drive(target=user.dst, name=dr['name'])
+        # temporarily add old user account to new drive as an organizer
+        user.dst.API.permissions().create(fileId=targ_id, body=add_user_body(user.src.address, "organizer"),
+                                          supportsAllDrives=True).execute()
         file_pile = user.get_all_drive_files(dr['id'])  # returns files AND Directories in a jumble
-        context = Context(user, dr['id'], targ_id)
-        for i in file_pile:
-            add_file(i, context)
-
-    pass
+        known_paths = set()
+        known_paths.add(dr['id'])
+        path_map = {dr['id']: targ_id}
+        # variables to detect a deadlock
+        same_count = 0
+        last_length = len(file_pile)
+        # loop through file_pile until it is empty
+        while file_pile:
+            for index, file in enumerate(file_pile):
+                if file['parents']['id'] in known_paths:
+                    # copy file over
+                    newID = user.src.API.files().copy(fileId=file['id'],
+                                                      parents=[path_map[file['parents']['id']]]).execute()
+                    # TODO: Handle file-specific permissions?
+                    known_paths.add(file['id'])
+                    path_map.update({file['id']: newID})
+                    # pop instead of remove to reduce time complexity
+                    file_pile.pop(index)
+                    if VERBOSE:
+                        print("moved file {}.".format(file['name']))
+            if len(file_pile) == last_length:
+                same_count += 1
+            else:
+                same_count = 0
+            if same_count > 2:
+                print("ERROR: deadlock detected! No new files have been moved for 3 iterations!")
+                if input("print debug info before exiting? (y/N): ").casefold() == 'y':
+                    print("Attempted moving files from drive ID {} to drive ID {}\n".format(dr['id'], targ_id))
+                    print("---Moved files:---")
+                    print(known_paths)
+                    print("\n---Pending files:---")
+                    print(file_pile)
+                print("shutting down due to error.")
+                exit(1)
+        finished_drives.add(dr['id'])
 
 
 def print_help():
-    print("Shared drive migrator script usage:")
-    print("./migrator.py [SRC CRED.json] [DST CRED.json] <Options>")
-    print("-----Required Arguments-----")
-    print("[SRC CRED.json]\t\t credentials for source organization service account")
-    print("[DST CRED.json]\t\t credentials for destination organization service account")
-    print("----------Options----------")
-    print("-i, --INTERACTIVE\t\t run in INTERACTIVE mode (for a few users at a time) (default)")
-    print("-a, --automatic [accounts].csv\t process accounts from a CSV (in bulk)")
-    print("-y, --yes\t\t\t automatically accept all confirmations / warnings")
-    exit(2)
+    print("""
+Team Drive workspace-to-workspace Migrator help
+
+Usage:
+    python migrator.py source_credentials.json destination_credentials.json [options]
+
+Options:
+    -i, --INTERACTIVE: Interactive mode (default)
+    -a, --automatic <csv_file>: Automatic mode with CSV file
+    -y, --yes: Assume Yes for all confirmations
+
+Example:
+    python migrator.py source_credentials.json destination_credentials.json -a users.csv
+
+Note:
+    - source_credentials.json and destination_credentials.json should be valid JSON files containing Google OAuth2 credentials.
+    - users.csv should be a CSV file containing the following columns:
+        - source_email
+        - destination_email
+    """)
 
 
 def parse_key(keypath: str) -> service_account.Credentials:
