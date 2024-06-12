@@ -22,27 +22,6 @@ VERBOSE = True
 finished_drives = set()
 
 
-class Dir:
-    def __init__(self, dir_id: str, name: str, parent):
-        self.id = dir_id
-        self.name = name
-        self.parent = parent
-        self.contents = []
-
-    def add_child_dir(self, dir_id):
-        self.contents.append(Dir(dir_id, self))
-
-    def add_child_file(self, file):
-        self.contents.append(file)
-
-
-class File:
-    def __init__(self, file_id: str, name: str, parent: Dir):
-        self.id = file_id
-        self.name = name
-        self.parent = parent
-
-
 class Org:
     def __init__(self, addr, creds: service_account.Credentials):
         self.address = addr
@@ -54,7 +33,7 @@ class User:
     def __init__(self, src: Org, dst: Org):
         self.src = src
         self.dst = dst
-        self.team_drives: list = self.src.API.drives().list().execute()['drives']
+        self.team_drives = self.get_team_drives()
 
     def get_all_drive_files(self, driveID: str, token: str | None = None) -> list[dict]:
         query_ret: dict = self.src.API.files().list(driveId=driveID, supportsAllDrives=True, corpora="drive",
@@ -64,6 +43,32 @@ class User:
         if 'nextPageToken' in query_ret.keys():
             file_list += self.get_all_drive_files(driveID, query_ret['nextPageToken'])
         return file_list
+
+    def permission_lookup(self, fileID: str, org=None, token=None) -> list[dict]:
+        if org is None:
+            org = self.src
+        response = org.API.permissions().list(fileId=fileID, supportsAllDrives=True, pageToken=token,
+                                              fields="nextPageToken, permissions(id, role, emailAddress)").execute()
+        permission_list = response['permissions']
+        if 'nextPageToken' in response.keys():
+            permission_list += self.permission_lookup(fileID, org, response['nextPageToken'])
+        return permission_list
+
+    def get_team_drives(self) -> list:
+        all_drives = self.src.API.drives().list().execute()['drives']
+        owned_drives = []
+        for drive in all_drives:
+            # run checks to make sure drive hasn't already been moved, in order of time complexity
+            if drive['id'] in finished_drives:
+                continue
+            if "Migrated" in drive['name']:
+                continue
+            # make sure we have organizer permission
+            for perm in self.permission_lookup(drive['id']):
+                if perm['emailAddress'] == self.src.address:
+                    if perm['role'] == 'organizer':
+                        owned_drives.append(drive)
+        return owned_drives
 
 
 # Generates the body for a permissions create request
@@ -83,10 +88,6 @@ def new_drive(target: Org, name: str) -> str:
 
 def migrate_user(user: User):
     for dr in user.team_drives:
-        # TODO: only do this part if user is owner of drive
-        if dr['id'] in finished_drives:
-            print("Skipping drive '{}' as it has already been migrated".format(dr['name']))
-            continue
         # create drive in destination org
         targ_id = new_drive(target=user.dst, name=dr['name'])
         # temporarily add old user account to new drive as an organizer
@@ -106,7 +107,6 @@ def migrate_user(user: User):
                     # copy file over
                     newID = user.src.API.files().copy(fileId=file['id'],
                                                       parents=[path_map[file['parents']['id']]]).execute()
-                    # TODO: Handle file-specific permissions?
                     known_paths.add(file['id'])
                     path_map.update({file['id']: newID})
                     # pop instead of remove to reduce time complexity
