@@ -144,7 +144,8 @@ def migrate_user(user: User) -> int:
         # update source drive to mark as migrated
         drive_update_body = {"name": dr['name'] + " - Migrated"}
         user.src.API.drives().update(driveId=dr['id'], body=drive_update_body).execute()
-        user.dst.API.permissions().delete(fileId=targ_id, permissionId = temp_access['id'], supportsAllDrives=True).execute()
+        user.dst.API.permissions().delete(fileId=targ_id, permissionId=temp_access['id'],
+                                          supportsAllDrives=True).execute()
     return moved_files
 
 
@@ -190,12 +191,16 @@ def ingest_csv(path: str) -> list[list[str]]:
     with open(path, 'r') as f:
         reader = csv.reader(f)
         for row in reader:
+            skiprow = False
             if len(row) != 2:
                 handle_csv_err("Expected 2 rows, found {}.".format(len(row)))
             for c in row:
                 if '@' not in c:
-                    print("warning: {} not a valid email address!".format(c))
-            account_list.append(row)
+                    if VERBOSE:
+                        print("warning: {} not a valid email address!".format(c))
+                    skiprow = True
+            if not skiprow:
+                account_list.append(row)
     if VERBOSE:
         print("Ingested {} account pairs.".format(len(account_list)))
     return account_list
@@ -253,6 +258,7 @@ if __name__ == "__main__":
             case _:
                 print("\n unknown argument {}! Bailing out.\n".format(sys.argv[arg_idx]))
                 print_help()
+        arg_idx += 1
     if INTERACTIVE:
         print("Running in interactive mode.")
         run_interactive()
