@@ -1,11 +1,7 @@
 import uuid
-
 import googleapiclient.discovery as gdiscover
-import logging
-import googleapiclient.schema
 from google.auth import exceptions
 from google.oauth2 import service_account
-import time
 import sys
 import csv
 import os
@@ -45,14 +41,14 @@ class User:
             file_list += self.get_all_drive_files(driveID, query_ret['nextPageToken'])
         return file_list
 
-    def permission_lookup(self, fileID: str, org=None, token=None) -> list[dict]:
+    def permission_lookup(self, file_id: str, org=None, token=None) -> list[dict]:
         if org is None:
             org = self.src
-        response = org.API.permissions().list(fileId=fileID, supportsAllDrives=True, pageToken=token,
+        response = org.API.permissions().list(fileId=file_id, supportsAllDrives=True, pageToken=token,
                                               fields="nextPageToken, permissions(id, role, emailAddress)").execute()
         permission_list = response['permissions']
         if 'nextPageToken' in response.keys():
-            permission_list += self.permission_lookup(fileID, org, response['nextPageToken'])
+            permission_list += self.permission_lookup(file_id, org, response['nextPageToken'])
         return permission_list
 
     def get_team_drives(self) -> list:
@@ -116,10 +112,10 @@ def migrate_user(user: User) -> int:
         # loop through file_pile until it is empty
         while file_pile:
             for index, file in enumerate(file_pile):
-                if file['parents'][0]['id'] in known_paths:
+                if file['parents'][0] in known_paths:
                     # copy file over
                     newID = user.src.API.files().copy(fileId=file['id'],
-                                                      parents=[path_map[file['parents'][0]['id']]]).execute()
+                                                      parents=[path_map[file['parents'][0]]]).execute()
                     known_paths.add(file['id'])
                     path_map.update({file['id']: newID})
                     # pop instead of remove to reduce time complexity
