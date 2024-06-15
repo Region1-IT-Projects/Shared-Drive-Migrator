@@ -1,5 +1,6 @@
 import uuid
 import googleapiclient.discovery as gdiscover
+import googleapiclient.errors as gapiErrors
 from google.auth import exceptions
 from google.oauth2 import service_account
 import sys
@@ -114,8 +115,13 @@ def migrate_user(user: User) -> int:
             for index, file in enumerate(file_pile):
                 if file['parents'][0] in known_paths:
                     # copy file over
-                    newID = user.src.API.files().copy(fileId=file['id'],
-                                                      parents=[path_map[file['parents'][0]]]).execute()
+                    new_file = {"parents": [path_map[file['parents'][0]]]}
+                    try:
+                        newID = (user.src.API.files().copy(fileId=file['id'], body=new_file, supportsAllDrives=True)
+                                 .execute())
+                    except gapiErrors.HttpError as e:
+                        print("Cannot copy file {}: {}".format(file['name'], e))
+                        continue
                     known_paths.add(file['id'])
                     path_map.update({file['id']: newID})
                     # pop instead of remove to reduce time complexity
