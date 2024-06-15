@@ -100,7 +100,7 @@ def migrate_user(user: User) -> int:
         temp_access = user.dst.API.permissions().create(fileId=targ_id,
                                                         body=add_user_body(user.src.address, "organizer"),
                                                         supportsAllDrives=True).execute()
-        file_pile = user.get_all_drive_files(dr['id'])  # returns files AND Directories in a jumble
+        file_pile = set(user.get_all_drive_files(dr['id']))  # returns files AND Directories in a jumble
         if VERBOSE:
             print("Discovered {} files and directories".format(len(file_pile)))
         moved_files += len(file_pile)
@@ -112,22 +112,28 @@ def migrate_user(user: User) -> int:
         last_length = len(file_pile)
         # loop through file_pile until it is empty
         while file_pile:
-            for index, file in enumerate(file_pile):
+            for file in file_pile:
                 if file['parents'][0] in known_paths:
-                    # copy file over
-                    new_file = {"parents": [path_map[file['parents'][0]]]}
-                    try:
-                        newID = (user.src.API.files().copy(fileId=file['id'], body=new_file, supportsAllDrives=True)
-                                 .execute())
-                    except gapiErrors.HttpError as e:
-                        print("Cannot copy file {}: {}".format(file['name'], e))
-                        continue
-                    known_paths.add(file['id'])
-                    path_map.update({file['id']: newID})
+                    file_metadata = {
+                        "name": file['name'],
+                        "mimeType": file['mimeType'],
+                        "parents": path_map[file['parents'][0]]
+                    }
+                    if file['mimeType'] == 'application/vnd.google-apps.folder':
+                        # 'file' is actually a folder and cannot be copied, make a folder with same name instead
+                        newID = user.dst.API.files().create(body=file_metadata, supportsAllDrives=True, fields='id').execute()
+                        known_paths.add(file['id'])
+                        path_map.update({file['id']: newID})
+                    else:
+                        # copy file over
+                        try:
+                            user.src.API.files().copy(fileId=file['id'], body=file_metadata, supportsAllDrives=True).execute()
+                        except gapiErrors.HttpError as e:
+                            print("ERR: Cannot copy file {}: {}".format(file['name'], e))
                     # pop instead of remove to reduce time complexity
-                    file_pile.pop(index)
+                    file_pile.remove(file)
                     if VERBOSE:
-                        print("moved file {}.".format(file['name']))
+                        print("moved file {}".format(file['name']))
             if len(file_pile) == last_length:
                 same_count += 1
             else:
@@ -146,8 +152,7 @@ def migrate_user(user: User) -> int:
         # update source drive to mark as migrated
         drive_update_body = {"name": dr['name'] + " - Migrated"}
         user.src.API.drives().update(driveId=dr['id'], body=drive_update_body).execute()
-        user.dst.API.permissions().delete(fileId=targ_id, permissionId=temp_access['id'],
-                                          supportsAllDrives=True).execute()
+       # user.dst.API.permissions().delete(fileId=targ_id, permissionId=temp_access['id'],supportsAllDrives=True).execute()
     return moved_files
 
 
