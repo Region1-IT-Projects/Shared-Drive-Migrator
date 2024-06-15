@@ -3,6 +3,7 @@ import uuid
 import googleapiclient.discovery as gdiscover
 import logging
 import googleapiclient.schema
+from google.auth import exceptions
 from google.oauth2 import service_account
 import time
 import sys
@@ -86,14 +87,26 @@ def new_drive(target: Org, name: str) -> str:
     return ret['id']
 
 
-def migrate_user(user: User):
+def migrate_user(user: User) -> int:
+    moved_files = 0
     for dr in user.team_drives:
+        print("Found team drive {}".format(dr['name']))
+        if not AUTO_ACCEPT:
+            if input("Move drive? (Y/n): ").casefold() == "n":
+                print("Skipping...")
+                continue
         # create drive in destination org
         targ_id = new_drive(target=user.dst, name=dr['name'])
+        if VERBOSE:
+            print("created drive in target organization with ID ", targ_id)
         # temporarily add old user account to new drive as an organizer
-        user.dst.API.permissions().create(fileId=targ_id, body=add_user_body(user.src.address, "organizer"),
-                                          supportsAllDrives=True).execute()
+        temp_access = user.dst.API.permissions().create(fileId=targ_id,
+                                                        body=add_user_body(user.src.address, "organizer"),
+                                                        supportsAllDrives=True).execute()
         file_pile = user.get_all_drive_files(dr['id'])  # returns files AND Directories in a jumble
+        if VERBOSE:
+            print("Discovered {} files and directories".format(len(file_pile)))
+        moved_files += len(file_pile)
         known_paths = set()
         known_paths.add(dr['id'])
         path_map = {dr['id']: targ_id}
@@ -103,10 +116,10 @@ def migrate_user(user: User):
         # loop through file_pile until it is empty
         while file_pile:
             for index, file in enumerate(file_pile):
-                if file['parents']['id'] in known_paths:
+                if file['parents'][0]['id'] in known_paths:
                     # copy file over
                     newID = user.src.API.files().copy(fileId=file['id'],
-                                                      parents=[path_map[file['parents']['id']]]).execute()
+                                                      parents=[path_map[file['parents'][0]['id']]]).execute()
                     known_paths.add(file['id'])
                     path_map.update({file['id']: newID})
                     # pop instead of remove to reduce time complexity
@@ -119,7 +132,7 @@ def migrate_user(user: User):
                 same_count = 0
             if same_count > 2:
                 print("ERROR: deadlock detected! No new files have been moved for 3 iterations!")
-                if input("print debug info before exiting? (y/N): ").casefold() == 'y':
+                if AUTO_ACCEPT or input("print debug info before exiting? (y/N): ").casefold() == 'y':
                     print("Attempted moving files from drive ID {} to drive ID {}\n".format(dr['id'], targ_id))
                     print("---Moved files:---")
                     print(known_paths)
@@ -128,6 +141,11 @@ def migrate_user(user: User):
                 print("shutting down due to error.")
                 exit(1)
         finished_drives.add(dr['id'])
+        # update source drive to mark as migrated
+        drive_update_body = {"name": dr['name'] + " - Migrated"}
+        user.src.API.drives().update(driveId=dr['id'], body=drive_update_body).execute()
+        user.dst.API.permissions().delete(fileId=targ_id, permissionId = temp_access['id'], supportsAllDrives=True).execute()
+    return moved_files
 
 
 def print_help():
@@ -151,6 +169,7 @@ Note:
         - source_email
         - destination_email
     """)
+    exit(1)
 
 
 def parse_key(keypath: str) -> service_account.Credentials:
@@ -177,13 +196,23 @@ def ingest_csv(path: str) -> list[list[str]]:
                 if '@' not in c:
                     print("warning: {} not a valid email address!".format(c))
             account_list.append(row)
-    print("Ingested {} account pairs.".format(len(account_list)))
+    if VERBOSE:
+        print("Ingested {} account pairs.".format(len(account_list)))
     return account_list
 
 
 def run_interactive():
-    print("Not implemented!")
-    exit(69)
+    src = Org(input("Source email address: ".casefold()), src_creds)
+    dst = Org(input("Destination email address: ".casefold()), dst_creds)
+    try:
+        user = User(src, dst)
+    except exceptions.RefreshError:
+        print("Authentication failed! Check email addresses and try again.")
+        exit(1)
+
+    migrate_user(user)
+    if input("Migrate another user? (y/N): ".casefold()) == 'y':
+        run_interactive()
 
 
 def run_automatic(accountPairs: list[list[str]]):
@@ -193,8 +222,8 @@ def run_automatic(accountPairs: list[list[str]]):
         dst_acc = Org(pair[1], dst_creds)
         user = User(src_acc, dst_acc)
         file_count += migrate_user(user)
-    print("Migrated migrated {} files from {} team drives from {} users.".format(file_count, len(finished_drives),
-                                                                                 len(accountPairs)))
+    print("Migrated {} files from {} team drives from {} users.".format(file_count, len(finished_drives),
+                                                                        len(accountPairs)))
     exit(0)
 
 
@@ -225,6 +254,7 @@ if __name__ == "__main__":
                 print("\n unknown argument {}! Bailing out.\n".format(sys.argv[arg_idx]))
                 print_help()
     if INTERACTIVE:
+        print("Running in interactive mode.")
         run_interactive()
 
     run_automatic(ingest_csv(USER_CSV))
