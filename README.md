@@ -70,7 +70,8 @@ pip install --upgrade google-api-python-client oauth2client
 ## Notes
 
 * The program requires OAuth2 credentials for both the source and destination organizations.
-* The migration process can take some time depending on the number of files to migrate.
+* The migration process is slow. Each call to the Google API can take up to 30 seconds, and migration of a single drive can take several hours.
+* If the program appears to hang, this is probably due to an API call taking a long time. Only kill the program if it doesn't respond in over a minute.
 
 
 ## Security Implications
