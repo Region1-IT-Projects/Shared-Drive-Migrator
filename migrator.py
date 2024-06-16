@@ -6,9 +6,10 @@ from google.oauth2 import service_account
 import sys
 import csv
 import os
+import time
 
 # Global vars
-VERSION = "α-indev"
+VERSION = "β 1"
 src_creds = None
 dst_creds = None
 SCOPE_LIST = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/admin.directory.user.readonly"]
@@ -16,7 +17,7 @@ INTERACTIVE = True
 USER_CSV = ""
 AUTO_ACCEPT = False
 VERBOSE = False
-
+TERMWIDTH = os.get_terminal_size().columns
 finished_drives = set()
 
 
@@ -142,7 +143,8 @@ def migrate_user(user: User) -> int:
                     }
                     if file.mimeType == 'application/vnd.google-apps.folder':
                         # 'file' is actually a folder and cannot be copied, make a folder with same name instead
-                        print("{} is a folder, making a new one.".format(file.name))
+                        if VERBOSE:
+                            print("{} is a folder, making a new one.".format(file.name))
                         newID = user.dst.API.files().create(body=file_metadata, supportsAllDrives=True,
                                                             fields='id').execute()['id']
                         if VERBOSE:
@@ -177,8 +179,8 @@ def migrate_user(user: User) -> int:
                 exit(1)
         finished_drives.add(dr['id'])
         # update source drive to mark as migrated
-        drive_update_body = {"name": dr['name'] + " - Migrated"}
-        user.src.API.drives().update(driveId=dr['id'], body=drive_update_body).execute()
+        # drive_update_body = {"name": dr['name'] + " - Migrated"}
+        # user.src.API.drives().update(driveId=dr['id'], body=drive_update_body).execute()
         user.dst.API.permissions().delete(fileId=targ_id, permissionId=temp_access['id'],
                                           supportsAllDrives=True).execute()
     return moved_files
@@ -200,7 +202,7 @@ Example:
     python migrator.py source_credentials.json destination_credentials.json -a users.csv
 
 Note:
-    - source_credentials.json and destination_credentials.json should be valid JSON files containing Google OAuth2 credentials.
+    - source_credentials.json and destination_credentials.json must be JSON files containing Google OAuth2 credentials.
     - users.csv should be a CSV file containing the following columns:
         - source_email
         - destination_email
@@ -269,7 +271,7 @@ def run_automatic(accountPairs: list[list[str]]):
 
 # Don't try to execute if we're being used as a library
 if __name__ == "__main__":
-    print("\nTeam Drive workspace-to-workspace Migrator version", VERSION)
+    print("Team Drive workspace-to-workspace Migrator version {}".format(VERSION).center(TERMWIDTH, '='))
     # Parse CLI arguments
     if len(sys.argv) < 3:
         print("Incorrect invocation: too few arguments!")
@@ -290,12 +292,17 @@ if __name__ == "__main__":
             case '-y' | '--yes':
                 print("script will assume Yes for ALL confirmations")
                 AUTO_ACCEPT = True
+            case '-v' | '--verbose':
+                print("Verbose mode selected")
+                VERBOSE = True
             case _:
                 print("\n unknown argument {}! Bailing out.\n".format(sys.argv[arg_idx]))
                 print_help()
         arg_idx += 1
+    start_time = time.time()
     if INTERACTIVE:
         print("Running in interactive mode.")
         run_interactive()
 
     run_automatic(ingest_csv(USER_CSV))
+    print("Finished in {} seconds.".format(round(time.time() - start_time, 1)))
