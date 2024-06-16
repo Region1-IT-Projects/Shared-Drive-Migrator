@@ -228,17 +228,18 @@ def ingest_csv(path: str) -> list[list[str]]:
     account_list = []
     with open(path, 'r') as f:
         reader = csv.reader(f)
-        for row in reader:
+        for index, row in enumerate(reader):
+            temp_row = []
             if len(row) != 2:
                 handle_csv_err("Expected 2 rows, found {}.".format(len(row)))
-                temp_row = []
-            for index, c in enumerate(row):
+            for c in row:
                 if '@' not in c:
                     if VERBOSE and index == 0:
                         print("warning: {} not a valid email address!".format(c))
                 else:
                     temp_row.append(c.strip().casefold())
-            account_list.append(temp_row)
+            if len(temp_row) == 2:
+                account_list.append(temp_row)
 
     if VERBOSE:
         print("Ingested {} account pair(s).".format(len(account_list)))
