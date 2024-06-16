@@ -83,6 +83,8 @@ def new_drive(target: Org, name: str) -> str:
     ret = target.API.drives().create(requestId=uuid.uuid1().hex, body=params).execute()
     return ret['id']
 
+# de-duplicate file list
+def fp_dedup(pile: list) -> list:
 
 def migrate_user(user: User) -> int:
     moved_files = 0
@@ -100,7 +102,8 @@ def migrate_user(user: User) -> int:
         temp_access = user.dst.API.permissions().create(fileId=targ_id,
                                                         body=add_user_body(user.src.address, "organizer"),
                                                         supportsAllDrives=True).execute()
-        file_pile = set(user.get_all_drive_files(dr['id']))  # returns files AND Directories in a jumble
+        file_pile = user.get_all_drive_files(dr['id'])  # returns files AND Directories in a jumble
+        print(file_pile)
         if VERBOSE:
             print("Discovered {} files and directories".format(len(file_pile)))
         moved_files += len(file_pile)
@@ -112,26 +115,31 @@ def migrate_user(user: User) -> int:
         last_length = len(file_pile)
         # loop through file_pile until it is empty
         while file_pile:
-            for file in file_pile:
+            for index, file in enumerate(file_pile):
                 if file['parents'][0] in known_paths:
                     file_metadata = {
                         "name": file['name'],
                         "mimeType": file['mimeType'],
-                        "parents": path_map[file['parents'][0]]
+                        "parents": [path_map[file['parents'][0]]]
                     }
                     if file['mimeType'] == 'application/vnd.google-apps.folder':
                         # 'file' is actually a folder and cannot be copied, make a folder with same name instead
-                        newID = user.dst.API.files().create(body=file_metadata, supportsAllDrives=True, fields='id').execute()
+                        print("{} is a folder, making a new one.".format(file['name']))
+                        newID = user.dst.API.files().create(body=file_metadata, supportsAllDrives=True,
+                                                            fields='id').execute()['id']
+                        if VERBOSE:
+                            print("new folder ID is {}".format(newID))
                         known_paths.add(file['id'])
                         path_map.update({file['id']: newID})
                     else:
-                        # copy file over
+                        print("Copying file from {} to {}.".format(file['parents'][0], file_metadata['parents'][0]))
                         try:
-                            user.src.API.files().copy(fileId=file['id'], body=file_metadata, supportsAllDrives=True).execute()
+                            user.src.API.files().copy(fileId=file['id'], body=file_metadata,
+                                                      supportsAllDrives=True).execute()
                         except gapiErrors.HttpError as e:
                             print("ERR: Cannot copy file {}: {}".format(file['name'], e))
                     # pop instead of remove to reduce time complexity
-                    file_pile.remove(file)
+                    file_pile.pop(index)
                     if VERBOSE:
                         print("moved file {}".format(file['name']))
             if len(file_pile) == last_length:
@@ -148,11 +156,12 @@ def migrate_user(user: User) -> int:
                     print(file_pile)
                 print("shutting down due to error.")
                 exit(1)
+            print("--loop--")
         finished_drives.add(dr['id'])
         # update source drive to mark as migrated
         drive_update_body = {"name": dr['name'] + " - Migrated"}
-        user.src.API.drives().update(driveId=dr['id'], body=drive_update_body).execute()
-       # user.dst.API.permissions().delete(fileId=targ_id, permissionId=temp_access['id'],supportsAllDrives=True).execute()
+    # user.src.API.drives().update(driveId=dr['id'], body=drive_update_body).execute()
+    # user.dst.API.permissions().delete(fileId=targ_id, permissionId=temp_access['id'],supportsAllDrives=True).execute()
     return moved_files
 
 
@@ -209,7 +218,7 @@ def ingest_csv(path: str) -> list[list[str]]:
             if not skiprow:
                 account_list.append(row)
     if VERBOSE:
-        print("Ingested {} account pairs.".format(len(account_list)))
+        print("Ingested {} account pair(s).".format(len(account_list)))
     return account_list
 
 
