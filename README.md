@@ -26,7 +26,7 @@ python migrator.py source_credentials.json destination_credentials.json [options
 * `-i`, `--INTERACTIVE`: Interactive mode where the user enters the source and destination email addresses.
 * `-a`, `--automatic <csv_file>`: Automatic mode where user information is read from a CSV file.
 * `-y`, `--yes`: Assumes Yes for all confirmations.
-* `-v`, `--verbose`: print more information.
+* `-q`, `--quiet`: print less information.
 
 **Example:**
 

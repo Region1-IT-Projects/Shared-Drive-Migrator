@@ -16,7 +16,7 @@ SCOPE_LIST = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.c
 INTERACTIVE = True
 USER_CSV = ""
 AUTO_ACCEPT = False
-VERBOSE = False
+VERBOSE = True
 TERMWIDTH = os.get_terminal_size().columns
 finished_drives = set()
 
@@ -198,6 +198,7 @@ Options:
     -i, --INTERACTIVE: Interactive mode (default)
     -a, --automatic <csv_file>: Automatic mode with CSV file
     -y, --yes: Assume Yes for all confirmations
+    -q, --quiet: Shut up
 
 Example:
     python migrator.py source_credentials.json destination_credentials.json -a users.csv
@@ -295,9 +296,9 @@ if __name__ == "__main__":
             case '-y' | '--yes':
                 print("script will assume Yes for ALL confirmations")
                 AUTO_ACCEPT = True
-            case '-v' | '--verbose':
+            case '-q' | '--quiet':
                 print("Verbose mode selected")
-                VERBOSE = True
+                VERBOSE = False
             case _:
                 print("\n unknown argument {}! Bailing out.\n".format(sys.argv[arg_idx]))
                 print_help()
