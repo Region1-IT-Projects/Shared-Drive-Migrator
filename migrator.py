@@ -108,6 +108,7 @@ def file_list_convert(pile: list[dict]) -> list[File]:
 def migrate_user(user: User) -> int:
     moved_files = 0
     for dr in user.team_drives:
+        drivestart = time.time()
         print("Found team drive {}".format(dr['name']))
         if not AUTO_ACCEPT:
             if input("Move drive? (Y/n): ").casefold() == "n":
@@ -122,7 +123,6 @@ def migrate_user(user: User) -> int:
                                                         body=add_user_body(user.src.address, "organizer"),
                                                         supportsAllDrives=True).execute()
         file_pile = file_list_convert(user.get_all_drive_files(dr['id']))  # returns files AND Directories in a jumble
-        print(file_pile)
         if VERBOSE:
             print("Discovered {} files and directories".format(len(file_pile)))
         moved_files += len(file_pile)
@@ -179,10 +179,11 @@ def migrate_user(user: User) -> int:
                 exit(1)
         finished_drives.add(dr['id'])
         # update source drive to mark as migrated
-        # drive_update_body = {"name": dr['name'] + " - Migrated"}
-        # user.src.API.drives().update(driveId=dr['id'], body=drive_update_body).execute()
+        drive_update_body = {"name": dr['name'] + " - Migrated"}
+        user.src.API.drives().update(driveId=dr['id'], body=drive_update_body).execute()
         user.dst.API.permissions().delete(fileId=targ_id, permissionId=temp_access['id'],
                                           supportsAllDrives=True).execute()
+        print("Finished migrating drive in {} seconds.".format(round(time.time() - drivestart, 1)))
     return moved_files
 
 
@@ -228,16 +229,17 @@ def ingest_csv(path: str) -> list[list[str]]:
     with open(path, 'r') as f:
         reader = csv.reader(f)
         for row in reader:
-            skiprow = False
             if len(row) != 2:
                 handle_csv_err("Expected 2 rows, found {}.".format(len(row)))
-            for c in row:
+                temp_row = []
+            for index, c in enumerate(row):
                 if '@' not in c:
-                    if VERBOSE:
+                    if VERBOSE and index == 0:
                         print("warning: {} not a valid email address!".format(c))
-                    skiprow = True
-            if not skiprow:
-                account_list.append(row)
+                else:
+                    temp_row.append(c.strip().casefold())
+            account_list.append(temp_row)
+
     if VERBOSE:
         print("Ingested {} account pair(s).".format(len(account_list)))
     return account_list
