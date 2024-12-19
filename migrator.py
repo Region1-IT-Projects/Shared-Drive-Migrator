@@ -1,6 +1,6 @@
 import uuid
 import googleapiclient.discovery as gdiscover
-import googleapiclient.errors as gapiErrors
+import googleapiclient.errors as gapi_errors
 from google.auth import exceptions
 from google.oauth2 import service_account
 import sys
@@ -91,7 +91,7 @@ def add_user_body(email: str, role: str = "writer"):
     }
 
 
-def new_drive(target: Org, name: str) -> str:
+def new_shared_drive(target: Org, name: str) -> str:
     params = {"name": name, "themeId": "abacus"}
     ret = target.API.drives().create(requestId=uuid.uuid1().hex, body=params).execute()
     return ret['id']
@@ -115,7 +115,7 @@ def migrate_user(user: User) -> int:
                 print("Skipping...")
                 continue
         # create drive in destination org
-        targ_id = new_drive(target=user.dst, name=dr['name'])
+        targ_id = new_shared_drive(target=user.dst, name=dr['name'])
         if VERBOSE:
             print("created drive in target organization with ID ", targ_id)
         # temporarily add old user account to new drive as an organizer
@@ -157,7 +157,7 @@ def migrate_user(user: User) -> int:
                         try:
                             user.src.API.files().copy(fileId=file.id, body=file_metadata,
                                                       supportsAllDrives=True).execute()
-                        except gapiErrors.HttpError as e:
+                        except gapi_errors.HttpError as e:
                             print("ERR: Cannot copy file {}: {}".format(file.name, e))
                     # pop instead of remove to reduce time complexity
                     file_pile.pop(index)
@@ -247,7 +247,7 @@ def ingest_csv(path: str) -> list[list[str]]:
     return account_list
 
 
-def run_interactive():
+def cli_run_interactive():
     src = Org(input("Source email address: ".casefold()), src_creds)
     dst = Org(input("Destination email address: ".casefold()), dst_creds)
     try:
@@ -258,7 +258,7 @@ def run_interactive():
 
     migrate_user(user)
     if input("Migrate another user? (y/N): ".casefold()) == 'y':
-        run_interactive()
+        cli_run_interactive()
 
 
 def run_automatic(accountPairs: list[list[str]]):
@@ -306,7 +306,7 @@ if __name__ == "__main__":
     start_time = time.time()
     if INTERACTIVE:
         print("Running in interactive mode.")
-        run_interactive()
+        cli_run_interactive()
 
     run_automatic(ingest_csv(USER_CSV))
     print("Finished in {} seconds.".format(round(time.time() - start_time, 1)))
