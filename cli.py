@@ -7,7 +7,8 @@ src_cred_path = sys.argv[1]
 dst_cred_path = sys.argv[2]
 
 try:
-    m = Migrator(src_cred_path, "hvrhs.org", dst_cred_path, "region1schools.org")
+    m = Migrator()
+    m.setup(src_cred_path, "hvrhs.org", dst_cred_path, "region1schools.org")
 except FileNotFoundError as e:
     print("Cannot init Migrator: ", e)
     exit(1)

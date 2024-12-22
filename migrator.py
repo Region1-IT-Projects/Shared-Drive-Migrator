@@ -94,6 +94,9 @@ class Org:
     def mark_file_moved(self, file_id: str, dest_id: str):
         self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": dest_id}}).execute()
 
+    def unmark_file_moved(self, file_id: str):
+        self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": None}}).execute()
+
 
 def check_email_validity(email: str, domain: str) -> bool:
     parts = email.split("@")
@@ -193,8 +196,10 @@ class Migrator:
     SCOPE_LIST = ["https://www.googleapis.com/auth/drive",
                   "https://www.googleapis.com/auth/admin.directory.user.readonly"]
 
-    def __init__(self, src_credpath: str, src_domain: str, dst_credpath: str, dst_domain: str):
+    def __int__(self):
         self.users = set()
+
+    def setup(self, src_credpath: str, src_domain: str, dst_credpath: str, dst_domain: str):
         if not self.set_src_creds(src_credpath, src_domain.strip().casefold()):
             raise FileNotFoundError("Source credentials file not found.")
         if not self.set_dst_creds(dst_credpath, dst_domain.strip().casefold()):

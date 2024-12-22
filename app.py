@@ -1,6 +1,9 @@
 from flask import Flask, render_template, flash, request, redirect, url_for
+from migrator import *
+import tempfile
 app = Flask(__name__)  # Flask constructor
-
+# globals
+mig = Migrator()
 @app.route('/')
 def hello():
     return render_template("index.html")
@@ -9,7 +12,9 @@ def hello():
 def setup(stage: str):
     if request.method == 'POST':
         # handle file upload
-        print("Got: ", request.files)
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        request.files['file'].save(tmp.name)
+        print("saved file to", tmp.name)
         return "File uploaded successfully", 200
         
     else:
@@ -20,4 +25,4 @@ def setup(stage: str):
         return render_template("setup.html", stage=stage, nextpage=next_page)
 
 if __name__ == '__main__':
-    app.run(multiprocessing=True)
+    app.run()
