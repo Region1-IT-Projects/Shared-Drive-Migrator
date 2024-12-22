@@ -20,4 +20,4 @@ def setup(stage: str):
         return render_template("setup.html", stage=stage, nextpage=next_page)
 
 if __name__ == '__main__':
-    app.run()
+    app.run(multiprocessing=True)

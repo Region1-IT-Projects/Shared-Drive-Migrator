@@ -3,8 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-hvrhs-worker.json
-region1-worker.json
+node_modules
+keys/
 *.asc
 
 # C extensions
