@@ -10,6 +10,7 @@ from google.oauth2 import service_account
 class GFile:
     moved = False
     trashed = False
+    moved_to = ""
     def __init__(self, indict):
         self.id = indict["id"]
         self.name = indict["name"]
@@ -18,7 +19,8 @@ class GFile:
         self.parent = indict["parents"][0]
         self.trashed: bool = indict["trashed"]
         self.moved = bool(indict.get("properties", {}).get("migrated_to"))
-
+        if self.moved:
+            self.moved_to = indict["properties"]["migrated_to"]
     def __repr__(self):
         return f"<File: {self.id}>"
 
@@ -31,7 +33,7 @@ class GDrive:
         self.name: str = indict["name"]
         self.hidden: bool = bool(indict["hidden"])
         self.restrictions: dict[str] = indict["restrictions"]
-        self.migrated: bool = False
+        self.migrated: bool = self.name.endswith(" - Migrated")
 
     def set_files(self, file_list: list[dict]):
         out = set()
@@ -127,9 +129,20 @@ class User:
                         owned_drives.append(drive)
         return owned_drives
 
-    def migrate_drive(self, source_drive: GDrive):
-        self.src.populate_drive_files(source_drive)
-        target_id = self.dst.new_team_drive(source_drive)
+    def prepare_team_drive_for_migrate(self, drive: GDrive) -> str | None:
+        self.src.populate_drive_files(drive)
+        if drive.migrated:
+            for file in drive.files:
+                if file.moved:
+                    # return ID of drive to which we have already migrated
+                    return file.moved_to
+
+    def migrate_drive(self, source_drive: GDrive, target_id: str | None = None) -> bool:
+        if not source_drive.file_count:
+            return False
+        # if we are not copying to an existing drive, make a new one
+        if target_id is None:
+            target_id = self.dst.new_team_drive(source_drive)
         # temporarily add source user account to dest drive as an organizer
         temp_access = self.dst.add_access(target_id, self.src.address)
         known_paths = set()
@@ -171,6 +184,7 @@ class User:
         self.dst.remove_access(target_id, temp_access)
         # mark drive as migrated
         self.src.mark_drive_moved(source_drive)
+        return True
 
 class Migrator:
     src_creds = None
