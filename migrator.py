@@ -76,7 +76,7 @@ class Org:
     def __get_all_drive_files(self, drive_id: str, token: str | None = None) -> list[dict]:
         query_ret: dict = self.API.files().list(driveId=drive_id, supportsAllDrives=True, corpora="drive",
                                                 includeItemsFromAllDrives=True, pageToken=token,
-                                                fields="nextPageToken, files(id, name, kind, mimeType, parents, trashed)").execute()
+                                                fields="nextPageToken, files(id, name, kind, mimeType, parents, trashed, properties)").execute()
         file_list: list = query_ret['files']
         if 'nextPageToken' in query_ret.keys():
             file_list += self.__get_all_drive_files(drive_id, query_ret['nextPageToken'])
@@ -137,7 +137,6 @@ class User:
         # mappings of filepath IDs from old to new drive
         path_map = {source_drive.id: target_id}
         # double loop, effectively BFS to add file parents before file
-        big_start = time.time()
         while source_drive.files:
             for index, file in enumerate(source_drive.files):
                 if file.trashed or file.moved:
@@ -145,7 +144,6 @@ class User:
                     # todo: remove me!
                     print("skipping file {}".format(file.name))
                     continue
-                file_start = time.time()
                 if file.parent in known_paths:
                     file_metadata = {
                         "name": file.name,
@@ -168,13 +166,11 @@ class User:
                     # pop instead of remove to reduce time complexity
                     self.src.mark_file_moved(file.id, target_id)
                     source_drive.files.pop(index)
-                    print("File xfer took {} seconds.".format(round(time.time() - file_start, 1)))
         source_drive.migrated = True
         # remove source account's access to dest drive
         self.dst.remove_access(target_id, temp_access)
         # mark drive as migrated
         self.src.mark_drive_moved(source_drive)
-        print("Drive migration took {} seconds.".format(round(time.time() - big_start, 1)))
 
 class Migrator:
     src_creds = None
