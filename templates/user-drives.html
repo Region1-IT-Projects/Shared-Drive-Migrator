@@ -1,0 +1,127 @@
+{% extends 'base.html' %}
+{% block head %}
+{{ super() }}
+<script>
+    tailwind.config = {
+        darkMode: 'class',
+        theme: {
+            extend: {
+                colors: {
+                    dark: {
+                        100: '#1a1a1a',
+                        200: '#2a2a2a',
+                        300: '#3a3a3a',
+                    }
+                }
+            }
+        }
+    }
+</script>
+<style>
+    .checkbox-wrapper {
+        display: inline-block;
+        position: relative;
+        padding-left: 25px;
+        cursor: pointer;
+    }
+    .checkbox-wrapper input {
+        position: absolute;
+        opacity: 0;
+        cursor: pointer;
+    }
+    .checkmark {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 20px;
+        width: 20px;
+        background-color: #2d3748;
+        border: 1px solid #4a5568;
+        border-radius: 3px;
+    }
+    .checkbox-wrapper:hover input ~ .checkmark {
+        background-color: #4a5568;
+    }
+    .checkbox-wrapper input:checked ~ .checkmark {
+        background-color: #48bb78;
+    }
+    .checkmark:after {
+        content: "";
+        position: absolute;
+        display: none;
+    }
+    .checkbox-wrapper input:checked ~ .checkmark:after {
+        display: block;
+    }
+    .checkbox-wrapper .checkmark:after {
+        left: 6px;
+        top: 2px;
+        width: 5px;
+        height: 10px;
+        border: solid white;
+        border-width: 0 2px 2px 0;
+        transform: rotate(45deg);
+    }
+</style>
+{% endblock %}
+{% block content %}
+
+<div class="container mx-auto p-8 max-w-2xl">
+    <h1 class="text-3xl font-bold mb-6 text-center">{{ name }}'s Owned Drives:</h1>
+
+    <div class="flex justify-between mb-6">
+        <label class="checkbox-wrapper">
+            Skip already-moved files
+            <input type="checkbox" checked>
+            <span class="checkmark"></span>
+        </label>
+        <label class="checkbox-wrapper">
+            Rename moved files
+            <input type="checkbox" checked>
+            <span class="checkmark"></span>
+        </label>
+    </div>
+
+    <div class="space-y-4">
+        <div class="flex items-center justify-between bg-blue-800 p-4 rounded-lg">
+            <span>Personal Drive</span>
+            <label class="checkbox-wrapper">
+                Migrate
+                <input type="checkbox" checked>
+                <span class="checkmark"></span>
+            </label>
+        </div>
+        <div class="flex items-center justify-between bg-blue-800 p-4 rounded-lg">
+            <span>Shared Drive 1</span>
+            <label class="checkbox-wrapper">
+                Migrate
+                <input type="checkbox" checked>
+                <span class="checkmark"></span>
+            </label>
+        </div>
+        <div class="flex items-center justify-between bg-gray-600 p-4 rounded-lg">
+            <span>Shared Drive 2 (already migrated)</span>
+            <label class="checkbox-wrapper">
+                Migrate
+                <input type="checkbox">
+                <span class="checkmark"></span>
+            </label>
+        </div>
+        <div class="flex items-center justify-between bg-blue-800 p-4 rounded-lg">
+            <span>Shared Drive 3</span>
+            <label class="checkbox-wrapper">
+                Migrate
+                <input type="checkbox" checked>
+                <span class="checkmark"></span>
+            </label>
+        </div>
+    </div>
+
+    <div class="mt-8 text-center">
+        <button class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-8 rounded-full transition duration-300">
+            Start
+        </button>
+    </div>
+</div>
+
+{% endblock %}

@@ -1,7 +1,6 @@
 import csv
 import uuid
 from typing import TextIO
-import time
 import googleapiclient.discovery as g_discover
 import googleapiclient.errors as g_api_errors
 from google.oauth2 import service_account
@@ -166,11 +165,11 @@ class User:
                     }
                     if file.mimeType == 'application/vnd.google-apps.folder':
                         # 'file' is actually a folder and cannot be copied, make a folder with same name instead
-                        newID = self.dst.API.files().create(body=file_metadata, supportsAllDrives=True,
+                        new_id = self.dst.API.files().create(body=file_metadata, supportsAllDrives=True,
                                                             fields='id').execute()['id']
 
                         known_paths.add(file.id)
-                        path_map.update({file.id: newID})
+                        path_map.update({file.id: new_id})
                     else:
                         try:
                             self.src.API.files().copy(fileId=file.id, body=file_metadata,
@@ -188,13 +187,14 @@ class User:
         return True
 
 class Migrator:
+    users: list[User] = []
     src_creds = None
     dst_creds = None
     SCOPE_LIST = ["https://www.googleapis.com/auth/drive",
                   "https://www.googleapis.com/auth/admin.directory.user.readonly"]
 
     def __int__(self):
-        self.users = set()
+        pass
 
     # return: string if error, list of string pairs (src, dst) if success
     def ingest_csv(self, data: TextIO) -> str | dict[str, str]:
@@ -231,5 +231,5 @@ class Migrator:
         src_acc = Org(source_addr, self.src_creds)
         dst_acc = Org(dest_addr, self.dst_creds)
         u = User(src_acc, dst_acc)
-        self.users.add(u)
+        self.users.append(u)
         return u
