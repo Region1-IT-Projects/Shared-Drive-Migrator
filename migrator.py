@@ -98,11 +98,9 @@ class Org:
         self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": None}}).execute()
 
 
-def check_email_validity(email: str, domain: str) -> bool:
+def check_email_validity(email: str) -> bool:
     parts = email.split("@")
     if len(parts) != 2:
-        return False
-    if parts[1] != domain:
         return False
     return True
 
@@ -192,18 +190,11 @@ class User:
 class Migrator:
     src_creds = None
     dst_creds = None
-    domains = ["", ""]
     SCOPE_LIST = ["https://www.googleapis.com/auth/drive",
                   "https://www.googleapis.com/auth/admin.directory.user.readonly"]
 
     def __int__(self):
         self.users = set()
-
-    def setup(self, src_credpath: str, src_domain: str, dst_credpath: str, dst_domain: str):
-        if not self.set_src_creds(src_credpath, src_domain.strip().casefold()):
-            raise FileNotFoundError("Source credentials file not found.")
-        if not self.set_dst_creds(dst_credpath, dst_domain.strip().casefold()):
-            raise FileNotFoundError("Destination credentials file not found.")
 
     # return: string if error, list of string pairs (src, dst) if success
     def ingest_csv(self, data: TextIO) -> str | dict[str, str]:
@@ -214,7 +205,7 @@ class Migrator:
                 return "Row {} invalid: {}cols != 2".format(index, len(row))
             temp_row = []
             for addr_idx, addr in enumerate(row):
-                if check_email_validity(addr, self.domains[addr_idx]):
+                if check_email_validity(addr):
                     temp_row.append(addr.strip().casefold())
                 else:
                     return "{} is not a valid email address!".format(addr)
@@ -222,18 +213,16 @@ class Migrator:
                 accounts[temp_row[0]] = temp_row[1]
         return accounts
 
-    def set_src_creds(self, credpath: str, domain: str) -> bool:
+    def set_src_creds(self, credpath: str) -> bool:
         try:
             self.src_creds = service_account.Credentials.from_service_account_file(credpath, scopes=self.SCOPE_LIST)
-            self.domains[0] = domain
             return True
         except FileNotFoundError:
             return False
 
-    def set_dst_creds(self, credpath: str, domain: str) -> bool:
+    def set_dst_creds(self, credpath: str) -> bool:
         try:
             self.dst_creds = service_account.Credentials.from_service_account_file(credpath, scopes=self.SCOPE_LIST)
-            self.domains[1] = domain
             return True
         except FileNotFoundError:
             return False

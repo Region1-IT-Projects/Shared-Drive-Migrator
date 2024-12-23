@@ -21,6 +21,22 @@
         </div>
     </div>
 
+    <!-- Flash Messages Section -->
+    <div class="container mx-auto mt-4">
+        {% with messages = get_flashed_messages(with_categories=True) %}
+        {% if messages %}
+            <div class="max-w-6xl w-full mx-auto">
+                {% for category, message in messages %}
+                <div class="p-4 mb-4 rounded-lg
+                            {% if category == 'success' %}bg-green-500 text-white{% elif category == 'error' %}bg-red-500 text-white{% else %}bg-gray-700 text-white{% endif %}">
+                    {{ message }}
+                </div>
+                {% endfor %}
+            </div>
+        {% endif %}
+        {% endwith %}
+    </div>
+
     <!-- Content Section -->
     <div class="container mx-auto mt-8">
         <div class="max-w-6xl w-full p-8 bg-gray-800 rounded-lg shadow-xl mx-auto">

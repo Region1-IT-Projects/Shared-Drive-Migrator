@@ -1,0 +1,34 @@
+{% extends 'base.html' %}
+{% block head %}
+{{ super() }}
+{% endblock %}
+{% block content %}
+<div class="text-center p-8">
+    <h1 class="text-3xl font-bold mb-6 text-center">Fatal Application Error</h1>
+
+    <p class="mb-6 text-center">
+        This program has suffered an unhandled critical error and cannot continue.
+    </p>
+
+    <div class="mb-6 text-center">
+        <button id="errorDetails" class="text-blue-400 hover:underline focus:outline-none">
+            Technical Details &gt;
+        </button>
+        <div id="errorContent" class="hidden mt-4 text-left bg-gray-800 p-4 rounded">
+            <pre class="whitespace-pre-wrap">
+                {{ err }}
+            </pre>
+        </div>
+    </div>
+</div>
+<script>
+    document.getElementById('errorDetails').addEventListener('click', function() {
+        const errorContent = document.getElementById('errorContent');
+        errorContent.classList.toggle('hidden');
+        this.textContent = errorContent.classList.contains('hidden')
+            ? 'Error Details (click to show) >'
+            : 'Error Details (click to hide) v';
+    });
+</script>
+
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends 'base.html' %}
+{% block head %}
+{{ super() }}
+<script>
+    tailwind.config = {
+        darkMode: 'class',
+        theme: {
+            extend: {
+                colors: {
+                    dark: {
+                        100: '#1E293B',
+                        200: '#334155',
+                    }
+                }
+            }
+        }
+    }
+</script>
+{% endblock %}
+{% block content %}
+    <h1 class="text-2xl font-bold mb-6 text-center">Individual User Migration</h1>
+    <p class="mb-6 text-center text-sm">
+        Migrate a user's personal Drive and any Team Drives of which they are the organizer.
+    </p>
+    <form class="space-y-6">
+        <div>
+            <label for="source" class="block mb-2 text-sm font-medium">Source (old) account address:</label>
+            <input type="email" id="source" placeholder="Enter Email Here" class="w-full px-4 py-2 rounded bg-gray-700 border border-gray-600 focus:border-blue-500 focus:ring-blue-500">
+        </div>
+        <div>
+            <label for="destination" class="block mb-2 text-sm font-medium">Destination (new) account address:</label>
+            <input type="email" id="destination" placeholder="Enter Email Here" class="w-full px-4 py-2 rounded bg-gray-700 border border-gray-600 focus:border-blue-500 focus:ring-blue-500">
+        </div>
+        <button type="submit" class="w-full px-4 py-2 text-white bg-green-600 rounded hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50 transition duration-200">
+            Go
+        </button>
+    </form>
+
+
+<script>
+    document.querySelector('form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        // Here you would typically handle the form submission,
+        // such as sending the data to a server or performing the migration
+        alert('Migration initiated!');
+    });
+</script>
+
+{% endblock %}
