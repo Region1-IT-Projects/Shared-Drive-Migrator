@@ -5,7 +5,6 @@ import googleapiclient.discovery as g_discover
 import googleapiclient.errors as g_api_errors
 from google.oauth2 import service_account
 
-
 class GFile:
     moved = False
     trashed = False
@@ -92,7 +91,8 @@ class Org:
             self.API.drives().update(driveId=drive.id, body={"name": drive.name + " - Migrated"}).execute()
 
     def mark_file_moved(self, file_id: str, dest_id: str):
-        self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": dest_id}}).execute()
+        print("FILE NOT MARKED due to [debug]")
+        #self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": dest_id}}).execute()
 
     def unmark_file_moved(self, file_id: str):
         self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": None}}).execute()

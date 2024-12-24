@@ -69,12 +69,6 @@
         border-width: 0 2px 2px 0;
         transform: rotate(45deg);
     }
-    .checkbox-wrapper:hover::after {
-        content: attr(data-hover-text); /* Dynamically retrieve text from the data-hover-text attribute */
-        display: block;
-        color: #000; /* Text color */
-        margin-top: 5px; /* Optional spacing for better positioning */
-    }
 </style>
 {% endblock %}
 {% block content %}
@@ -83,12 +77,12 @@
     <h1 class="text-3xl font-bold mb-6 text-center">{{ name }}'s Owned Drives:</h1>
 
     <div class="flex justify-between mb-6">
-        <label class="checkbox-wrapper" data-hover-text="Do not try to copy files that have already been moved. (reccomended)">
+        <label class="checkbox-wrapper">
             Skip already-moved files
             <input name="skip_moved" type="checkbox" checked>
             <span class="checkmark"></span>
         </label>
-        <label class="checkbox-wrapper" data-hover-text="Files are always invisibly marked as moved. Check this to rename them as well.">
+        <label class="checkbox-wrapper">
             Rename moved files
             <input name="rename_moved" type="checkbox">
             <span class="checkmark"></span>
@@ -106,14 +100,16 @@
         </div>
         {% for team_drive in drives %}
         <div class="flex items-center justify-between {% if team_drive.migrated %} bg-gray-600 {% else %} bg-blue-800 {% endif %} p-4 rounded-lg">
-            <div id="{{ team_drive.id }}-spinner" class="hidden mt-4 text-center">
-                <svg class="animate-spin h-6 w-6 text-white mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                <p id="{{ team_drive.id }}-progress" class="text-sm text-gray-400 mt-2">Processing...</p>
-            </div>
             <span>{{ team_drive.name }}</span>
+            <div id="{{ team_drive.id }}-spinner" class="hidden mt-4 text-center flex items-center">
+                <svg class="animate-spin h-6 w-6 text-white" xmlns="http://www.w3.org/2000/svg" fill="none"
+                     viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <p id="{{ team_drive.id }}-progress" class="text-sm text-gray-400 ml-2">Processing...</p>
+            </div>
             <label class="checkbox-wrapper">
                 Migrate
                 <input name="{{ team_drive.id }}-domigrate" type="checkbox" {% if not team_drive.migrated %} checked {%
@@ -125,99 +121,117 @@
     </div>
 
     <div class="mt-8 text-center">
-        <button class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-8 rounded-full transition duration-300">
+        <button id="start_btn" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-8 rounded-full transition duration-300">
             Start
         </button>
+        <div id="btn_spinner" class="hidden mt-4 text-center">
+        <svg class="animate-spin h-6 w-6 text-white mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <p class="text-sm text-gray-400 mt-2">Indexing Files... (this will take a while)</p>
+    </div>
     </div>
 </div>
 <script>
-    function updateProgress(id) {
-    try {
-        // Make a request to the server
-        const response = fetch(`/migrate/progress/${id}`);
+    async function updateProgress(id) {
+        try {
+            // Make a request to the server
+            const response = await fetch(`/migrate/progress/${id}`);
 
-        let data;
-        if (!response.ok) {
-            data = "Progress Request Failed: " + response.statusText;
-        }
-        else {
-            data = response.text();
-        }
-
-        // Find the target element by ID
-        const progressElement = document.getElementById(`${id}-progress`);
-        let progress = parseInt(data.split('/')[0])/parseInt(data.split('/')[1]);
-        // Ensure the element exists before updating
-        if (progressElement) {
-            if (progress === 1) {
-                progressElement.textContent = "Done";
-            }
-            else {
-                progressElement.textContent = data || "???/???";
-            }
-            return (progress === 1);
-        } else {
-            console.error(`Element with ID "${id}-progress" not found in the document.`);
-        }
-    } catch (error) {
-        console.error("Error fetching or updating progress:", error);
-    }
-}
-
-
-document.querySelector('button').addEventListener('click', () => {
-    // Gather checkbox data
-    const checkboxes = document.querySelectorAll('input[type="checkbox"]');
-    const checkboxData = {};
-
-    checkboxes.forEach(checkbox => {
-        checkboxData[checkbox.name] = checkbox.checked;
-    });
-
-    // Send data via POST request
-    fetch('/migrate/user/drives/', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(checkboxData),
-    })
-        .then(response => {
-            if (response.ok) {
-                let enabled_drives = [];
-                checkboxes.forEach(checkbox => {
-                    if (checkbox.checked && checkbox.name.endsWith('-domigrate')) {
-                        enabled_drives.push(checkbox.name.split('-')[0]);
-                    }
-                });
-                while (enabled_drives.length > 0) {
-                    for (let i = 0; i < enabled_drives.length; i++) {
-                        let spinner = document.getElementById(`${enabled_drives[i]}-spinner`)
-                        if (updateProgress(enabled_drives[i])) {
-                            // remove drive from active list
-                            enabled_drives.splice(i, 1);
-                            // disable spinner
-                            if (!spinner.classList.contains('hidden')) {
-                                spinner.classList.add('hidden');
-                            }
-                        }
-                        else {
-                            if (spinner.classList.contains('hidden')) {
-                                spinner.classList.remove('hidden')
-                            }
-                        }
-                    }
-                }
-                window.location.href = `/migrate/user/drives/complete`;
+            let data;
+            if (!response.ok) {
+                data = "Progress Request Failed: " + response.statusText;
             } else {
-                alert('Failed to submit migration request: ' + response.statusText);
+                data = await response.text();
             }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('An error occurred while submitting the migration request.');
+
+            // Find the target element by ID
+            const progressElement = document.getElementById(`${id}-progress`);
+            let progress = parseInt(data.split('/')[0]) / parseInt(data.split('/')[1]);
+            // Ensure the element exists before updating
+            if (progressElement) {
+                if (progress === 1) {
+                    progressElement.textContent = "Done";
+                } else {
+                    progressElement.textContent = data || "???/???";
+                }
+                return (progress === 1);
+            } else {
+                console.error(`Element with ID "${id}-progress" not found in the document.`);
+            }
+        } catch (error) {
+            console.error("Error fetching or updating progress:", error);
+        }
+    }
+    const start_button = document.getElementById('start_btn');
+    start_button.addEventListener('click', () => {
+        document.getElementById('btn_spinner').classList.remove('hidden');
+        start_button.disabled = true;
+        start_button.classList.add('opacity-50', 'cursor-not-allowed');
+        // Gather checkbox data
+        const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+        const checkboxData = {};
+
+        checkboxes.forEach(checkbox => {
+            checkboxData[checkbox.name] = checkbox.checked;
         });
-});
+
+        // Send data via POST request
+        fetch('/migrate/user/drives/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(checkboxData),
+        })
+            .then(response => {
+                if (response.ok) {
+                    start_button.classList.add('hidden');
+                    let enabled_drives = [];
+                    checkboxes.forEach(checkbox => {
+                        if (checkbox.checked && checkbox.name.endsWith('-domigrate')) {
+                            enabled_drives.push(checkbox.name.split('-')[0]);
+                        }
+                    });
+
+                    // Poll for progress updates every second
+                    const pollProgressUpdates = async () => {
+                        while (enabled_drives.length > 0) {
+                            for (let i = 0; i < enabled_drives.length; i++) {
+                                const spinner = document.getElementById(`${enabled_drives[i]}-spinner`);
+                                if (await updateProgress(enabled_drives[i])) {
+                                    // Remove drive from active list
+                                    enabled_drives.splice(i, 1);
+                                    // Disable spinner
+                                    if (!spinner.classList.contains('hidden')) {
+                                        spinner.classList.add('hidden');
+                                    }
+                                } else {
+                                    if (spinner.classList.contains('hidden')) {
+                                        spinner.classList.remove('hidden');
+                                    }
+                                }
+                            }
+
+                            // Wait for 1 second before the next polling iteration
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                        }
+                    };
+
+                    pollProgressUpdates().then(() => {
+                        // Redirect to complete page after polling finishes
+                        window.location.href = `/migrate/success`;
+                    });
+                } else {
+                    alert('Failed to submit migration request: ' + response.statusText);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('An error occurred while submitting the migration request.');
+            });
+    });
 
 </script>
 

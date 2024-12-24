@@ -1,11 +1,12 @@
+import logging
 from flask import Flask, render_template, flash, request, redirect, url_for
 from migrator import *
 import tempfile
 import traceback
 import threading
 app = Flask(__name__)  # Flask constructor
+logging.getLogger('werkzeug').addHandler(logging.NullHandler())
 app.secret_key = 'changeme'
-app.debug = True
 # globals
 mig = Migrator()
 
@@ -50,7 +51,7 @@ def migrate_user():
         dst_user = request.form['destination']
         if mig.create_user(src_user, dst_user) is not None:
             return "OK", 200
-        flash("User creation failed. Please try again.")
+        flash("Failed to acquire user credentials. Please try again.")
     return render_template('migrate-user.html', next_page="/migrate/user/drives/")
 
 
@@ -69,8 +70,8 @@ def migrate_user_drives():
                 if request.json[i.id+"-domigrate"]: 
                     to_migrate.append(i)
             for drive in to_migrate:
-                targ = user.prepare_team_drive_for_migrate(drive)
-                thread = threading.Thread(target=user.migrate_drive, args=(drive, targ))
+                dst = user.prepare_team_drive_for_migrate(drive)
+                thread = threading.Thread(target=user.migrate_drive, args=(drive, dst))
                 thread.start()
             return "OK", 200
         else:
@@ -85,6 +86,11 @@ def migrate_progress(drive_id):
             if drive.id == drive_id:
                 return "{}/{}".format((drive.file_count-len(drive.files)), drive.file_count), 200
     return "NOT FOUND", 404
+
+@app.route('/migrate/success/')
+def migrate_success():
+    flash("Migration completed successfully.")
+    return redirect(url_for('modeselect'))
 
 @app.errorhandler(500)
 def handle_internal_error(e):
