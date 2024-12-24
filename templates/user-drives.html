@@ -24,11 +24,13 @@
         padding-left: 25px;
         cursor: pointer;
     }
+
     .checkbox-wrapper input {
         position: absolute;
         opacity: 0;
         cursor: pointer;
     }
+
     .checkmark {
         position: absolute;
         top: 0;
@@ -39,20 +41,25 @@
         border: 1px solid #4a5568;
         border-radius: 3px;
     }
+
     .checkbox-wrapper:hover input ~ .checkmark {
         background-color: #4a5568;
     }
+
     .checkbox-wrapper input:checked ~ .checkmark {
         background-color: #48bb78;
     }
+
     .checkmark:after {
         content: "";
         position: absolute;
         display: none;
     }
+
     .checkbox-wrapper input:checked ~ .checkmark:after {
         display: block;
     }
+
     .checkbox-wrapper .checkmark:after {
         left: 6px;
         top: 2px;
@@ -62,6 +69,12 @@
         border-width: 0 2px 2px 0;
         transform: rotate(45deg);
     }
+    .checkbox-wrapper:hover::after {
+        content: attr(data-hover-text); /* Dynamically retrieve text from the data-hover-text attribute */
+        display: block;
+        color: #000; /* Text color */
+        margin-top: 5px; /* Optional spacing for better positioning */
+    }
 </style>
 {% endblock %}
 {% block content %}
@@ -70,14 +83,14 @@
     <h1 class="text-3xl font-bold mb-6 text-center">{{ name }}'s Owned Drives:</h1>
 
     <div class="flex justify-between mb-6">
-        <label class="checkbox-wrapper">
+        <label class="checkbox-wrapper" data-hover-text="Do not try to copy files that have already been moved. (reccomended)">
             Skip already-moved files
-            <input type="checkbox" checked>
+            <input name="skip_moved" type="checkbox" checked>
             <span class="checkmark"></span>
         </label>
-        <label class="checkbox-wrapper">
+        <label class="checkbox-wrapper" data-hover-text="Files are always invisibly marked as moved. Check this to rename them as well.">
             Rename moved files
-            <input type="checkbox" checked>
+            <input name="rename_moved" type="checkbox">
             <span class="checkmark"></span>
         </label>
     </div>
@@ -87,34 +100,28 @@
             <span>Personal Drive</span>
             <label class="checkbox-wrapper">
                 Migrate
-                <input type="checkbox" checked>
+                <input name="personal" type="checkbox" checked>
                 <span class="checkmark"></span>
             </label>
         </div>
-        <div class="flex items-center justify-between bg-blue-800 p-4 rounded-lg">
-            <span>Shared Drive 1</span>
+        {% for team_drive in drives %}
+        <div class="flex items-center justify-between {% if team_drive.migrated %} bg-gray-600 {% else %} bg-blue-800 {% endif %} p-4 rounded-lg">
+            <div id="{{ team_drive.id }}-spinner" class="hidden mt-4 text-center">
+                <svg class="animate-spin h-6 w-6 text-white mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <p id="{{ team_drive.id }}-progress" class="text-sm text-gray-400 mt-2">Processing...</p>
+            </div>
+            <span>{{ team_drive.name }}</span>
             <label class="checkbox-wrapper">
                 Migrate
-                <input type="checkbox" checked>
+                <input name="{{ team_drive.id }}-domigrate" type="checkbox" {% if not team_drive.migrated %} checked {%
+                       endif %}>
                 <span class="checkmark"></span>
             </label>
         </div>
-        <div class="flex items-center justify-between bg-gray-600 p-4 rounded-lg">
-            <span>Shared Drive 2 (already migrated)</span>
-            <label class="checkbox-wrapper">
-                Migrate
-                <input type="checkbox">
-                <span class="checkmark"></span>
-            </label>
-        </div>
-        <div class="flex items-center justify-between bg-blue-800 p-4 rounded-lg">
-            <span>Shared Drive 3</span>
-            <label class="checkbox-wrapper">
-                Migrate
-                <input type="checkbox" checked>
-                <span class="checkmark"></span>
-            </label>
-        </div>
+        {% endfor %}
     </div>
 
     <div class="mt-8 text-center">
@@ -123,5 +130,95 @@
         </button>
     </div>
 </div>
+<script>
+    function updateProgress(id) {
+    try {
+        // Make a request to the server
+        const response = fetch(`/migrate/progress/${id}`);
+
+        let data;
+        if (!response.ok) {
+            data = "Progress Request Failed: " + response.statusText;
+        }
+        else {
+            data = response.text();
+        }
+
+        // Find the target element by ID
+        const progressElement = document.getElementById(`${id}-progress`);
+        let progress = parseInt(data.split('/')[0])/parseInt(data.split('/')[1]);
+        // Ensure the element exists before updating
+        if (progressElement) {
+            if (progress === 1) {
+                progressElement.textContent = "Done";
+            }
+            else {
+                progressElement.textContent = data || "???/???";
+            }
+            return (progress === 1);
+        } else {
+            console.error(`Element with ID "${id}-progress" not found in the document.`);
+        }
+    } catch (error) {
+        console.error("Error fetching or updating progress:", error);
+    }
+}
+
+
+document.querySelector('button').addEventListener('click', () => {
+    // Gather checkbox data
+    const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+    const checkboxData = {};
+
+    checkboxes.forEach(checkbox => {
+        checkboxData[checkbox.name] = checkbox.checked;
+    });
+
+    // Send data via POST request
+    fetch('/migrate/user/drives/', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(checkboxData),
+    })
+        .then(response => {
+            if (response.ok) {
+                let enabled_drives = [];
+                checkboxes.forEach(checkbox => {
+                    if (checkbox.checked && checkbox.name.endsWith('-domigrate')) {
+                        enabled_drives.push(checkbox.name.split('-')[0]);
+                    }
+                });
+                while (enabled_drives.length > 0) {
+                    for (let i = 0; i < enabled_drives.length; i++) {
+                        let spinner = document.getElementById(`${enabled_drives[i]}-spinner`)
+                        if (updateProgress(enabled_drives[i])) {
+                            // remove drive from active list
+                            enabled_drives.splice(i, 1);
+                            // disable spinner
+                            if (!spinner.classList.contains('hidden')) {
+                                spinner.classList.add('hidden');
+                            }
+                        }
+                        else {
+                            if (spinner.classList.contains('hidden')) {
+                                spinner.classList.remove('hidden')
+                            }
+                        }
+                    }
+                }
+                window.location.href = `/migrate/user/drives/complete`;
+            } else {
+                alert('Failed to submit migration request: ' + response.statusText);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('An error occurred while submitting the migration request.');
+        });
+});
+
+</script>
 
 {% endblock %}

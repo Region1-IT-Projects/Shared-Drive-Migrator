@@ -2,7 +2,7 @@ from flask import Flask, render_template, flash, request, redirect, url_for
 from migrator import *
 import tempfile
 import traceback
-
+import threading
 app = Flask(__name__)  # Flask constructor
 app.secret_key = 'changeme'
 app.debug = True
@@ -54,14 +54,37 @@ def migrate_user():
     return render_template('migrate-user.html', next_page="/migrate/user/drives/")
 
 
-@app.route('/migrate/user/drives/')
+@app.route('/migrate/user/drives/', methods=['GET', 'POST'])
 def migrate_user_drives():
     if len(mig.users) == 0:
         flash("Please enter user information first.")
         return redirect(url_for('migrate_user'))
     user = mig.users[-1]
-    return render_template('user-drives.html', name=user.src.address.split("@")[0], drives=user.get_owned_team_drives())
+    if request.method == 'POST':
+        print(type(request.json),request.json)
+        if isinstance(request.json, dict):
+            # TODO: user personal drive migration
+            to_migrate = []
+            for i in user.drives:
+                if request.json[i.id+"-domigrate"]: 
+                    to_migrate.append(i)
+            for drive in to_migrate:
+                targ = user.prepare_team_drive_for_migrate(drive)
+                thread = threading.Thread(target=user.migrate_drive, args=(drive, targ))
+                thread.start()
+            return "OK", 200
+        else:
+            return "BAD REQUEST FORMAT (not JSON)", 400
+    else:
+        return render_template('user-drives.html', name=user.src.address.split("@")[0].title(), drives=user.get_owned_team_drives())
 
+@app.route('/migrate/progress/<drive_id>/')
+def migrate_progress(drive_id):
+    for user in mig.users:
+        for drive in user.drives:
+            if drive.id == drive_id:
+                return "{}/{}".format((drive.file_count-len(drive.files)), drive.file_count), 200
+    return "NOT FOUND", 404
 
 @app.errorhandler(500)
 def handle_internal_error(e):

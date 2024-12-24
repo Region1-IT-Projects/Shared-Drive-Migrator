@@ -32,7 +32,7 @@ class GDrive:
         self.name: str = indict["name"]
         self.hidden: bool = bool(indict["hidden"])
         self.restrictions: dict[str] = indict["restrictions"]
-        self.migrated: bool = self.name.endswith(" - Migrated")
+        self.migrated: bool = bool(self.name.count("Migrated"))
 
     def set_files(self, file_list: list[dict]):
         out = set()
@@ -88,7 +88,8 @@ class Org:
         drive.set_files(file_list)
 
     def mark_drive_moved(self, drive: GDrive):
-        self.API.drives().update(driveId=drive.id, body={"name": drive.name + " - Migrated"}).execute()
+        if drive.name.count("Migrated") == 0: # don't add migrated more than once
+            self.API.drives().update(driveId=drive.id, body={"name": drive.name + " - Migrated"}).execute()
 
     def mark_file_moved(self, file_id: str, dest_id: str):
         self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": dest_id}}).execute()
@@ -104,10 +105,13 @@ def check_email_validity(email: str) -> bool:
     return True
 
 class User:
+    src: Org
+    dst: Org
+    drives: list[GDrive]
     def __init__(self, from_org: Org, to_org: Org):
         self.src = from_org
         self.dst = to_org
-
+        self.drives = []
     def permission_lookup(self, file_id: str, org=None, token=None) -> list[dict]:
         if org is None:
             org = self.src
@@ -120,14 +124,13 @@ class User:
 
     def get_owned_team_drives(self) -> list[GDrive]:
         all_drives = self.src.get_drives()
-        owned_drives = []
         for drive in all_drives:
             # make sure we have organizer permission
             for perm in self.permission_lookup(drive.id):
                 if perm['emailAddress'] == self.src.address:
                     if perm['role'] == 'organizer':
-                        owned_drives.append(drive)
-        return owned_drives
+                        self.drives.append(drive)
+        return self.drives
 
     def prepare_team_drive_for_migrate(self, drive: GDrive) -> str | None:
         self.src.populate_drive_files(drive)
@@ -138,6 +141,7 @@ class User:
                     return file.moved_to
 
     def migrate_drive(self, source_drive: GDrive, target_id: str | None = None) -> bool:
+        print("Starting migration")
         if not source_drive.file_count:
             return False
         # if we are not copying to an existing drive, make a new one
