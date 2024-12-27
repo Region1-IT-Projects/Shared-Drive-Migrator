@@ -1,5 +1,6 @@
 import csv
 import uuid
+from threading import Thread
 from typing import TextIO
 import googleapiclient.discovery as g_discover
 import googleapiclient.errors as g_api_errors
@@ -24,6 +25,7 @@ class GFile:
 
 
 class GDrive:
+    migrator_thread: Thread | None = None
     def __init__(self, indict: dict):
         self.file_count = 0
         self.files: list[GFile] = []
@@ -75,7 +77,7 @@ class Org:
 
     def __get_all_drive_files(self, drive_id: str, token: str | None = None) -> list[dict]:
         query_ret: dict = self.API.files().list(driveId=drive_id, supportsAllDrives=True, corpora="drive",
-                                                includeItemsFromAllDrives=True, pageToken=token,
+                                                includeItemsFromAllDrives=False, pageToken=token,
                                                 fields="nextPageToken, files(id, name, kind, mimeType, parents, trashed, properties)").execute()
         file_list: list = query_ret['files']
         if 'nextPageToken' in query_ret.keys():
@@ -143,6 +145,7 @@ class User:
     def migrate_drive(self, source_drive: GDrive, target_id: str | None = None) -> bool:
         print("Starting migration")
         if not source_drive.file_count:
+            print("No files found in drive {}. Has it been initialized?".format(source_drive.name))
             return False
         # if we are not copying to an existing drive, make a new one
         if target_id is None:
@@ -178,7 +181,7 @@ class User:
                         try:
                             self.src.API.files().copy(fileId=file.id, body=file_metadata,
                                                       supportsAllDrives=True).execute()
-                        except g_api_errors.HttpError as e:
+                        except (g_api_errors.HttpError, TimeoutError) as e:
                             print("ERR: Cannot copy file {}: {}".format(file.name, e))
                     # pop instead of remove to reduce time complexity
                     self.src.mark_file_moved(file.id, target_id)

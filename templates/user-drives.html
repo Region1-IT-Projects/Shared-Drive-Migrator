@@ -140,14 +140,15 @@
             const response = await fetch(`/migrate/progress/${id}`);
 
             let data;
+            const progressElement = document.getElementById(`${id}-progress`);
             if (!response.ok) {
-                data = "Progress Request Failed: " + response.statusText;
+                data = "Failed: " + response.statusText;
+                progressElement.textContent = data;
+                return true; // act as if migration is complete
             } else {
                 data = await response.text();
             }
 
-            // Find the target element by ID
-            const progressElement = document.getElementById(`${id}-progress`);
             let progress = parseInt(data.split('/')[0]) / parseInt(data.split('/')[1]);
             // Ensure the element exists before updating
             if (progressElement) {
@@ -188,6 +189,7 @@
             .then(response => {
                 if (response.ok) {
                     start_button.classList.add('hidden');
+                    document.getElementById('btn_spinner').classList.add('hidden');
                     let enabled_drives = [];
                     checkboxes.forEach(checkbox => {
                         if (checkbox.checked && checkbox.name.endsWith('-domigrate')) {

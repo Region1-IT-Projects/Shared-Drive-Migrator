@@ -5,7 +5,7 @@ import tempfile
 import traceback
 import threading
 app = Flask(__name__)  # Flask constructor
-logging.getLogger('werkzeug').addHandler(logging.NullHandler())
+# logging.getLogger('werkzeug').addHandler(logging.NullHandler())
 app.secret_key = 'changeme'
 # globals
 mig = Migrator()
@@ -70,9 +70,14 @@ def migrate_user_drives():
                 if request.json[i.id+"-domigrate"]: 
                     to_migrate.append(i)
             for drive in to_migrate:
+                if drive.migrator_thread is not None:
+                    if drive.migrator_thread.is_alive():
+                        flash ("A task to migrate Drive {} is already running!".format(drive.name))
+                        continue
                 dst = user.prepare_team_drive_for_migrate(drive)
                 thread = threading.Thread(target=user.migrate_drive, args=(drive, dst))
                 thread.start()
+                drive.migrator_thread = thread
             return "OK", 200
         else:
             return "BAD REQUEST FORMAT (not JSON)", 400
@@ -84,6 +89,8 @@ def migrate_progress(drive_id):
     for user in mig.users:
         for drive in user.drives:
             if drive.id == drive_id:
+                if len(drive.files) != 0 and not drive.migrator_thread.is_alive():
+                    return "Migrator Thread Crashed", 500
                 return "{}/{}".format((drive.file_count-len(drive.files)), drive.file_count), 200
     return "NOT FOUND", 404
 
