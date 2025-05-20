@@ -15,7 +15,14 @@ class GFile:
         self.name = indict["name"]
         self.kind = indict["kind"]
         self.mimeType = indict["mimeType"]
-        self.parent = indict["parents"][0]
+        try:
+            self.parent = indict["parents"][0]
+        except KeyError:
+            self.parent = None
+        try:
+            self.is_mine: bool = indict["owners"][0]['me']
+        except KeyError:
+            self.owner = False
         self.trashed: bool = indict["trashed"]
         self.moved = bool(indict.get("properties", {}).get("migrated_to"))
         if self.moved:
@@ -53,6 +60,7 @@ class Org:
         self.delegated_creds = creds.with_subject(addr)
         self.API = g_discover.build('drive', 'v3', credentials=self.delegated_creds)
         self.known_drives = {}
+        self.personal_files: list[GFile] = []
 
     def new_team_drive(self, predecessor: GDrive) -> str:
         params = {"name": predecessor.name, "restrictions": predecessor.restrictions, "themeId": "abacus"}
@@ -75,18 +83,26 @@ class Org:
             self.known_drives[drive.id] = drive
         return out
 
-    def __get_all_drive_files(self, drive_id: str, token: str | None = None) -> list[dict]:
-        query_ret: dict = self.API.files().list(driveId=drive_id, supportsAllDrives=True, corpora="drive",
-                                                includeItemsFromAllDrives=False, pageToken=token,
-                                                fields="nextPageToken, files(id, name, kind, mimeType, parents, trashed, properties)").execute()
+    def __fetch_files(self, token: str | None = None, **kwargs) -> list[dict]:
+        query_ret: dict = self.API.files().list(pageToken=token,
+                                                fields="nextPageToken, files(id, name, kind, mimeType, parents, owners, trashed, properties)",
+                                                **kwargs).execute()
         file_list: list = query_ret['files']
         if 'nextPageToken' in query_ret.keys():
-            file_list += self.__get_all_drive_files(drive_id, query_ret['nextPageToken'])
+            file_list += self.__fetch_files(query_ret['nextPageToken'], **kwargs)
         return file_list
 
     def populate_drive_files(self, drive: GDrive):
-        file_list = self.__get_all_drive_files(drive.id)
+        file_list = self.__fetch_files(driveId=drive.id, supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="drive")
         drive.set_files(file_list)
+
+    def get_personal_files(self):
+        file_list = self.__fetch_files(corpora="user", supportsAllDrives=False, includeItemsFromAllDrives=False)
+        for i in file_list:
+            f = GFile(i)
+            if f.is_mine and not f.trashed:
+                self.personal_files.append(f)
+        return self.personal_files
 
     def mark_drive_moved(self, drive: GDrive):
         if drive.name.count("Migrated") == 0: # don't add migrated more than once
@@ -161,8 +177,6 @@ class User:
             for index, file in enumerate(source_drive.files):
                 if file.trashed or file.moved:
                     source_drive.files.pop(index)
-                    # todo: remove me!
-                    print("skipping file {}".format(file.name))
                     continue
                 if file.parent in known_paths:
                     file_metadata = {
@@ -192,6 +206,44 @@ class User:
         # mark drive as migrated
         self.src.mark_drive_moved(source_drive)
         return True
+
+    def migrate_personal_files(self, collate_loose_files: bool = True):
+        if len(self.src.personal_files) == 0:
+            print("Getting personal files...")
+            self.src.get_personal_files()
+        folder_metadata = {
+            "name": "Migrated",
+            "mimeType": 'application/vnd.google-apps.folder'
+        }
+        new_root_id = self.src.API.files().create(body=folder_metadata, fields='id').execute()['id']
+        folder_metadata['parents'] = [new_root_id]
+        folder_metadata['name'] = 'Loose Files'
+        orphan_folder_id = self.src.API.files().create(body=folder_metadata, fields='id').execute()['id']
+        print("trying to move {} personal files".format(len(self.src.personal_files)))
+        skips = 0
+        for personal_file in self.src.personal_files:
+            if personal_file.parent is None:
+                # move orphan to orphan folder
+                if collate_loose_files:
+                    new_parent = orphan_folder_id
+                else:
+                    if personal_file.mimeType != 'application/vnd.google-apps.folder':
+                        continue # skip non-folder entities if collation is disabled
+                    new_parent = new_root_id
+                res = self.src.API.files().update(fileId=personal_file.id, addParents=new_parent, fields='parents').execute()
+                try:
+                    if res["parents"][0] == new_parent:
+                        self.src.personal_files.remove(personal_file)
+                        print("Personal file {} moved to {}".format(personal_file.id, new_parent))
+                    else:
+                        print("File {} did not move correctly! Now in: {}".format(personal_file.name, res["parents"][0]))
+                except KeyError:
+                    print("File {} failed to move!".format(personal_file.name))
+            else:
+                skips += 1
+                if personal_file.name == 'test1':
+                    print("found")
+        print("skipped {} personal files".format(skips))
 
 class Migrator:
     users: list[User] = []

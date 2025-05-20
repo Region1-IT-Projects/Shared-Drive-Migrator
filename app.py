@@ -62,9 +62,10 @@ def migrate_user_drives():
         return redirect(url_for('migrate_user'))
     user = mig.users[-1]
     if request.method == 'POST':
-        print(type(request.json),request.json)
         if isinstance(request.json, dict):
-            # TODO: user personal drive migration
+            if request.json['personal']:
+                #threading.Thread(target=user.migrate_personal_files, args=(request.json['collate_loose'])).start()
+                user.migrate_personal_files(True)
             to_migrate = []
             for i in user.drives:
                 if request.json[i.id+"-domigrate"]: 
