@@ -249,7 +249,7 @@ class User:
             "mimeType": "application/vnd.google-apps.folder",
             "parents": [dst_root]
         }
-        dst_folder_id = self.dst.API.files().create(body=folder_metadata)
+        dst_folder_id = self.dst.API.files().create(body=folder_metadata).execute()['id']
         migrated_files = set()
         known_paths = {src_root: dst_folder_id}
         # make a copy of the shared files in target user's drive
@@ -279,8 +279,10 @@ class User:
                     known_paths[file_metadata['id']] = new_folder_id
                 else:
                     # copy file to target drive
-                    self.dst.API.files().copy(fileId=file_id, body=file_metadata).execute()
+                    self.dst.API.files().copy(fileId=file_id, body=new_metadata).execute()
                 migrated_files.add(file_id)
+                # add a labeled to file indicating it has been copied
+                self.src.mark_file_moved(file_id, new_metadata['parents'][0])
         print("Copied {} files to target drive.".format(len(migrated_files)))
         # un-share all files in personal drive
         for file_id in files_and_shares:
