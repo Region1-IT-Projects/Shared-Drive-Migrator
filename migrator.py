@@ -1,10 +1,32 @@
 import csv
 import uuid
+import time
 from threading import Thread
 from typing import TextIO
 import googleapiclient.discovery as g_discover
 import googleapiclient.errors as g_api_errors
 from google.oauth2 import service_account
+from google.auth.transport.requests import Request
+
+def execute_with_backoff(request_func, *args, **kwargs):
+    """Executes a Google API request with exponential backoff on rate limit errors."""
+    delay = 1
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            return request_func(*args, **kwargs)
+        except g_api_errors.HttpError as e:
+            if e.resp.status == 429 or (hasattr(e, 'error_details') and 'rateLimitExceeded' in str(e)):
+                print(f"Rate limit hit. Retrying in {delay} seconds (attempt {attempt+1}/{max_retries})...")
+                time.sleep(delay)
+                delay *= 2
+            else:
+                raise
+        except Exception as e:
+            print("Google API request failed: {}".format(e))
+            raise
+    print("Max retries exceeded for Google API request.")
+    raise
 
 class GFile:
     moved = False
@@ -22,7 +44,7 @@ class GFile:
         try:
             self.is_mine: bool = indict["owners"][0]['me']
         except KeyError:
-            self.owner = False
+            self.is_mine = False
         self.trashed: bool = indict["trashed"]
         self.moved = bool(indict.get("properties", {}).get("migrated_to"))
         if self.moved:
@@ -58,24 +80,33 @@ class Org:
     def __init__(self, addr, creds: service_account.Credentials):
         self.address = addr
         self.delegated_creds = creds.with_subject(addr)
-        self.API = g_discover.build('drive', 'v3', credentials=self.delegated_creds)
+        self.API = g_discover.build(
+            'drive', 'v3',
+            credentials=self.delegated_creds
+        )
         self.known_drives = {}
         self.personal_files: list[GFile] = []
 
     def new_team_drive(self, predecessor: GDrive) -> str:
         params = {"name": predecessor.name, "restrictions": predecessor.restrictions, "themeId": "abacus"}
-        ret = self.API.drives().create(requestId=uuid.uuid1().hex, body=params).execute()
+        ret = execute_with_backoff(lambda: self.API.drives().create(requestId=uuid.uuid1().hex, body=params).execute())
         return ret['id']
 
     def add_access(self, file_id: str, email: str, role: str = "writer"):
-        return self.API.permissions().create(fileId=file_id, body={"emailAddress": email, "role": role, "type": "user"},
-                                             supportsAllDrives=True).execute()['id']
+        return execute_with_backoff(
+            lambda: self.API.permissions().create(fileId=file_id, body={"emailAddress": email, "role": role, "type": "user"},
+                                                 supportsAllDrives=True).execute()
+        )['id']
 
     def remove_access(self, file_id: str, access_id: str):
-        self.API.permissions().delete(fileId=file_id, permissionId=access_id, supportsAllDrives=True).execute()
+        execute_with_backoff(
+            lambda: self.API.permissions().delete(fileId=file_id, permissionId=access_id, supportsAllDrives=True).execute()
+        )
 
     def get_drives(self):
-        tmp = self.API.drives().list(fields="drives(id, name, hidden, restrictions)").execute()['drives']
+        tmp = execute_with_backoff(
+            lambda: self.API.drives().list(fields="drives(id, name, hidden, restrictions)").execute()
+        )['drives']
         out = []
         for i in tmp:
             drive = GDrive(i)
@@ -84,9 +115,11 @@ class Org:
         return out
 
     def __fetch_files(self, token: str | None = None, **kwargs) -> list[dict]:
-        query_ret: dict = self.API.files().list(pageToken=token,
-                                                fields="nextPageToken, files(id, name, kind, mimeType, parents, owners, trashed, properties)",
-                                                **kwargs).execute()
+        query_ret: dict = execute_with_backoff(
+            lambda: self.API.files().list(pageToken=token,
+                                          fields="nextPageToken, files(id, name, kind, mimeType, parents, owners, trashed, properties)",
+                                          **kwargs).execute()
+        )
         file_list: list = query_ret['files']
         if 'nextPageToken' in query_ret.keys():
             file_list += self.__fetch_files(query_ret['nextPageToken'], **kwargs)
@@ -106,14 +139,19 @@ class Org:
 
     def mark_drive_moved(self, drive: GDrive):
         if drive.name.count("Migrated") == 0: # don't add migrated more than once
-            self.API.drives().update(driveId=drive.id, body={"name": drive.name + " - Migrated"}).execute()
+            execute_with_backoff(
+                lambda: self.API.drives().update(driveId=drive.id, body={"name": drive.name + " - Migrated"}).execute()
+            )
 
     def mark_file_moved(self, file_id: str, dest_id: str):
-        print("FILE NOT MARKED due to [debug]")
-        #self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": dest_id}}).execute()
+        execute_with_backoff(
+            lambda: self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": dest_id}}).execute()
+        )
 
     def unmark_file_moved(self, file_id: str):
-        self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": None}}).execute()
+        execute_with_backoff(
+            lambda: self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": None}}).execute()
+        )
 
 
 def check_email_validity(email: str) -> bool:
@@ -133,8 +171,10 @@ class User:
     def permission_lookup(self, file_id: str, org=None, token=None) -> list[dict]:
         if org is None:
             org = self.src
-        response = org.API.permissions().list(fileId=file_id, supportsAllDrives=True, pageToken=token,
-                                              fields="nextPageToken, permissions(id, role, emailAddress)").execute()
+        response = execute_with_backoff(
+            lambda: org.API.permissions().list(fileId=file_id, supportsAllDrives=True, pageToken=token,
+                                               fields="nextPageToken, permissions(id, role, emailAddress)").execute()
+        )
         permission_list = response['permissions']
         if 'nextPageToken' in response.keys():
             permission_list += self.permission_lookup(file_id, org, response['nextPageToken'])
@@ -158,7 +198,7 @@ class User:
                     # return ID of drive to which we have already migrated
                     return file.moved_to
 
-    def migrate_drive(self, source_drive: GDrive, target_id: str | None = None) -> bool:
+    def migrate_drive(self, source_drive: GDrive, target_id: str | None = None, skip_moved: bool = True) -> bool:
         print("Starting migration")
         if not source_drive.file_count:
             print("No files found in drive {}. Has it been initialized?".format(source_drive.name))
@@ -175,7 +215,7 @@ class User:
         # double loop, effectively BFS to add file parents before file
         while source_drive.files:
             for index, file in enumerate(source_drive.files):
-                if file.trashed or file.moved:
+                if file.trashed or (file.moved and skip_moved):
                     source_drive.files.pop(index)
                     continue
                 if file.parent in known_paths:
@@ -186,15 +226,19 @@ class User:
                     }
                     if file.mimeType == 'application/vnd.google-apps.folder':
                         # 'file' is actually a folder and cannot be copied, make a folder with same name instead
-                        new_id = self.dst.API.files().create(body=file_metadata, supportsAllDrives=True,
-                                                            fields='id').execute()['id']
+                        new_id = execute_with_backoff(
+                            lambda: self.dst.API.files().create(body=file_metadata, supportsAllDrives=True,
+                                                                fields='id').execute()
+                        )['id']
 
                         known_paths.add(file.id)
                         path_map.update({file.id: new_id})
                     else:
                         try:
-                            self.src.API.files().copy(fileId=file.id, body=file_metadata,
-                                                      supportsAllDrives=True).execute()
+                            execute_with_backoff(
+                                lambda: self.src.API.files().copy(fileId=file.id, body=file_metadata,
+                                                                  supportsAllDrives=True).execute()
+                            )
                         except (g_api_errors.HttpError, TimeoutError) as e:
                             print("ERR: Cannot copy file {}: {}".format(file.name, e))
                     # pop instead of remove to reduce time complexity
@@ -208,7 +252,7 @@ class User:
         return True
 
     # share all files in personal drive to target user, return dict of file IDs to access IDs
-    def share_personal_files(self) -> dict[str, str]:
+    def share_personal_files(self, skip_moved: bool) -> dict[str, str]:
         file_share_lookup = {}
         if len(self.src.personal_files) == 0:
             self.src.get_personal_files()
@@ -217,7 +261,7 @@ class User:
             return file_share_lookup
         # share every file in personal drive to target user
         for file in self.src.personal_files:
-            if file.trashed or file.moved:
+            if file.trashed or (file.moved and skip_moved):
                 continue
             try:
                 access_id = self.src.add_access(file.id, self.dst.address)
@@ -231,15 +275,19 @@ class User:
     # dst: replicate folder structure (and collate loose if requested), keep dict of mappings old->new
     # dst: make a copy of shared files, placing into corresponding folder structure
     # src: un-share all shared files, mark as xfered
-    def migrate_personal_files(self):
-        files_and_shares = self.share_personal_files()
+    def migrate_personal_files(self, skip_moved: bool = True):
+        files_and_shares = self.share_personal_files(skip_moved)
         if len(files_and_shares) == 0:
             print("No files to migrate!")
             return
         # get base path of source and target users' drives
         try:
-            src_root = self.src.API.files().get(fileId="root", fields="id").execute()['id']
-            dst_root = self.dst.API.files().get(fileId="root", fields="id").execute()['id']
+            src_root = execute_with_backoff(
+                lambda: self.src.API.files().get(fileId="root", fields="id").execute()
+            )['id']
+            dst_root = execute_with_backoff(
+                lambda: self.dst.API.files().get(fileId="root", fields="id").execute()
+            )['id']
         except ValueError:
             print("ERR: Cannot get root folder ID!")
             return
@@ -249,7 +297,9 @@ class User:
             "mimeType": "application/vnd.google-apps.folder",
             "parents": [dst_root]
         }
-        dst_folder_id = self.dst.API.files().create(body=folder_metadata).execute()['id']
+        dst_folder_id = execute_with_backoff(
+            lambda: self.dst.API.files().create(body=folder_metadata).execute()
+        )['id']
         migrated_files = set()
         known_paths = {src_root: dst_folder_id}
         # make a copy of the shared files in target user's drive
@@ -259,7 +309,9 @@ class User:
                     continue
                 # get file metadata
                 try:
-                    file_metadata = self.src.API.files().get(fileId=file_id, fields="id, name, mimeType, parents").execute()
+                    file_metadata = execute_with_backoff(
+                        lambda: self.src.API.files().get(fileId=file_id, fields="id, name, mimeType, parents").execute()
+                    )
                 except g_api_errors.HttpError as e:
                     print("ERR: Cannot get file {}: {}".format(file_id, e))
                     continue
@@ -275,11 +327,15 @@ class User:
                     continue
                 # check if file is a folder
                 if file_metadata['mimeType'] == 'application/vnd.google-apps.folder':
-                    new_folder_id = self.dst.API.files().create(body=new_metadata).execute()['id']
+                    new_folder_id = execute_with_backoff(
+                        lambda: self.dst.API.files().create(body=new_metadata).execute()
+                    )['id']
                     known_paths[file_metadata['id']] = new_folder_id
                 else:
                     # copy file to target drive
-                    self.dst.API.files().copy(fileId=file_id, body=new_metadata).execute()
+                    execute_with_backoff(
+                        lambda: self.dst.API.files().copy(fileId=file_id, body=new_metadata).execute()
+                    )
                 migrated_files.add(file_id)
                 # add a labeled to file indicating it has been copied
                 self.src.mark_file_moved(file_id, new_metadata['parents'][0])

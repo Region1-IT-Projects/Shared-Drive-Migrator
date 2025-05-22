@@ -4,8 +4,10 @@ from migrator import *
 import tempfile
 import traceback
 import threading
+import webbrowser
+
 app = Flask(__name__)  # Flask constructor
-# logging.getLogger('werkzeug').addHandler(logging.NullHandler())
+logging.getLogger('werkzeug').addHandler(logging.NullHandler())
 app.secret_key = 'changeme'
 # globals
 mig = Migrator()
@@ -63,9 +65,12 @@ def migrate_user_drives():
     user = mig.users[-1]
     if request.method == 'POST':
         if isinstance(request.json, dict):
+            # Track personal drive migration thread
             if request.json['personal']:
-                #threading.Thread(target=user.migrate_personal_files, args=()).start()
-                user.migrate_personal_files()
+                if not hasattr(user, 'personal_migrator_thread') or user.personal_migrator_thread is None or not user.personal_migrator_thread.is_alive():
+                    thread = threading.Thread(target=user.migrate_personal_files, args=([bool(request.json['skip_moved'])]))
+                    thread.start()
+                    user.personal_migrator_thread = thread
             to_migrate = []
             for i in user.drives:
                 if request.json[i.id+"-domigrate"]: 
@@ -76,7 +81,7 @@ def migrate_user_drives():
                         flash ("A task to migrate Drive {} is already running!".format(drive.name))
                         continue
                 dst = user.prepare_team_drive_for_migrate(drive)
-                thread = threading.Thread(target=user.migrate_drive, args=(drive, dst))
+                thread = threading.Thread(target=user.migrate_drive, args=([drive, dst, bool(request.json['skip_moved'])]))
                 thread.start()
                 drive.migrator_thread = thread
             return "OK", 200
@@ -85,9 +90,27 @@ def migrate_user_drives():
     else:
         return render_template('user-drives.html', name=user.src.address.split("@")[0].title(), drives=user.get_owned_team_drives())
 
+
 @app.route('/migrate/progress/<drive_id>/')
 def migrate_progress(drive_id):
     for user in mig.users:
+        # Handle personal drive progress
+        if drive_id == "personal":
+            # Only show progress if migration started
+            if hasattr(user, 'personal_migrator_thread') and user.personal_migrator_thread is not None:
+                # If thread is dead but files remain, treat as crashed
+                if len(user.src.personal_files) != 0 and not user.personal_migrator_thread.is_alive():
+                    return "Migrator Thread Crashed", 500
+                total = len(user.src.personal_files)
+                # Count migrated files (marked as moved)
+                migrated = sum(1 for f in user.src.personal_files if f.moved)
+                # If no files, treat as done
+                if total == 0:
+                    return "1/1", 200
+                return f"{migrated}/{total}", 200
+            else:
+                return "0/1", 200
+        # Team drive progress
         for drive in user.drives:
             if drive.id == drive_id:
                 if len(drive.files) != 0 and not drive.migrator_thread.is_alive():
@@ -95,10 +118,12 @@ def migrate_progress(drive_id):
                 return "{}/{}".format((drive.file_count-len(drive.files)), drive.file_count), 200
     return "NOT FOUND", 404
 
+
 @app.route('/migrate/success/')
 def migrate_success():
     flash("Migration completed successfully.")
     return redirect(url_for('modeselect'))
+
 
 @app.errorhandler(500)
 def handle_internal_error(e):
@@ -106,5 +131,12 @@ def handle_internal_error(e):
     return render_template('show-err.html', err=trace[trace.rindex("File "):]), 500
 
 
+def open_browser():
+    time.sleep(1)  # Give the server time to start
+    print("Opening browser to http://127.0.0.1:5000/")
+    webbrowser.open_new("http://127.0.0.1:5000/")
+
+
 if __name__ == '__main__':
-    app.run()
+    threading.Thread(target=open_browser).start()
+    app.run(host="127.0.0.1", port=5000, debug=False)

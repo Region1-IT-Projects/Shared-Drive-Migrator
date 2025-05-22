@@ -85,8 +85,17 @@
     </div>
 
     <div class="space-y-4">
-        <div class="flex items-center justify-between bg-blue-800 p-4 rounded-lg">
+        <div class="flex items-center justify-between bg-purple-800 p-4 rounded-lg">
             <span>Personal Drive</span>
+            <div id="personal-spinner" class="hidden mt-4 text-center flex items-center">
+                <svg class="animate-spin h-6 w-6 text-white" xmlns="http://www.w3.org/2000/svg" fill="none"
+                     viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <p id="personal-progress" class="text-sm text-gray-400 ml-2">Processing...</p>
+            </div>
             <label class="checkbox-wrapper">
                  Migrate
                 <input name="personal" type="checkbox" checked>
@@ -191,12 +200,20 @@
                             enabled_drives.push(checkbox.name.split('-')[0]);
                         }
                     });
+                    // Add personal drive if checked
+                    if (checkboxData['personal']) {
+                        enabled_drives.push('personal');
+                    }
 
                     // Poll for progress updates every second
                     const pollProgressUpdates = async () => {
                         while (enabled_drives.length > 0) {
                             for (let i = 0; i < enabled_drives.length; i++) {
-                                const spinner = document.getElementById(`${enabled_drives[i]}-spinner`);
+                                const spinner = document.getElementById(
+                                    enabled_drives[i] === 'personal'
+                                        ? 'personal-spinner'
+                                        : `${enabled_drives[i]}-spinner`
+                                );
                                 if (await updateProgress(enabled_drives[i])) {
                                     // Remove drive from active list
                                     enabled_drives.splice(i, 1);
