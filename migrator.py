@@ -22,7 +22,7 @@ class GFile:
         try:
             self.is_mine: bool = indict["owners"][0]['me']
         except KeyError:
-            self.owner = False
+            self.is_mine = False
         self.trashed: bool = indict["trashed"]
         self.moved = bool(indict.get("properties", {}).get("migrated_to"))
         if self.moved:
@@ -109,8 +109,7 @@ class Org:
             self.API.drives().update(driveId=drive.id, body={"name": drive.name + " - Migrated"}).execute()
 
     def mark_file_moved(self, file_id: str, dest_id: str):
-        print("FILE NOT MARKED due to [debug]")
-        #self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": dest_id}}).execute()
+        self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": dest_id}}).execute()
 
     def unmark_file_moved(self, file_id: str):
         self.API.files().update(fileId=file_id, supportsAllDrives=True, body={"properties": {"migrated_to": None}}).execute()
@@ -158,7 +157,7 @@ class User:
                     # return ID of drive to which we have already migrated
                     return file.moved_to
 
-    def migrate_drive(self, source_drive: GDrive, target_id: str | None = None) -> bool:
+    def migrate_drive(self, source_drive: GDrive, skip_migrated: bool, target_id: str | None = None) -> bool:
         print("Starting migration")
         if not source_drive.file_count:
             print("No files found in drive {}. Has it been initialized?".format(source_drive.name))
@@ -175,7 +174,7 @@ class User:
         # double loop, effectively BFS to add file parents before file
         while source_drive.files:
             for index, file in enumerate(source_drive.files):
-                if file.trashed or file.moved:
+                if file.trashed or (file.moved and skip_migrated):
                     source_drive.files.pop(index)
                     continue
                 if file.parent in known_paths:
@@ -208,7 +207,7 @@ class User:
         return True
 
     # share all files in personal drive to target user, return dict of file IDs to access IDs
-    def share_personal_files(self) -> dict[str, str]:
+    def share_personal_files(self, skip_migrated: bool) -> dict[str, str]:
         file_share_lookup = {}
         if len(self.src.personal_files) == 0:
             self.src.get_personal_files()
@@ -217,7 +216,7 @@ class User:
             return file_share_lookup
         # share every file in personal drive to target user
         for file in self.src.personal_files:
-            if file.trashed or file.moved:
+            if file.trashed or (file.moved and skip_migrated):
                 continue
             try:
                 access_id = self.src.add_access(file.id, self.dst.address)
@@ -231,8 +230,8 @@ class User:
     # dst: replicate folder structure (and collate loose if requested), keep dict of mappings old->new
     # dst: make a copy of shared files, placing into corresponding folder structure
     # src: un-share all shared files, mark as xfered
-    def migrate_personal_files(self):
-        files_and_shares = self.share_personal_files()
+    def migrate_personal_files(self, skip_migrated: bool = False):
+        files_and_shares = self.share_personal_files(skip_migrated)
         if len(files_and_shares) == 0:
             print("No files to migrate!")
             return

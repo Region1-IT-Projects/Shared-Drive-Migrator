@@ -4,9 +4,11 @@ from migrator import *
 import tempfile
 import traceback
 import threading
+import time
+import webbrowser
 app = Flask(__name__)  # Flask constructor
-# logging.getLogger('werkzeug').addHandler(logging.NullHandler())
-app.secret_key = 'changeme'
+logging.getLogger('werkzeug').addHandler(logging.NullHandler())
+app.secret_key = 'supersecret'
 # globals
 mig = Migrator()
 
@@ -21,7 +23,6 @@ def setup(stage: str):
         # handle file upload
         tmp = tempfile.NamedTemporaryFile(delete=False)
         request.files['file'].save(tmp.name)
-        print("saved file to", tmp.name)
         if stage == "source":
             mig.set_src_creds(tmp.name)
         else:
@@ -32,7 +33,7 @@ def setup(stage: str):
         if stage == "source":
             next_page = "/setup/destination"
         else:
-            next_page = "/modeselect"
+            next_page = "/migrate/user"
         return render_template("setup.html", stage=stage, nextpage=next_page)
 
 
@@ -64,8 +65,8 @@ def migrate_user_drives():
     if request.method == 'POST':
         if isinstance(request.json, dict):
             if request.json['personal']:
-                #threading.Thread(target=user.migrate_personal_files, args=()).start()
-                user.migrate_personal_files()
+                threading.Thread(target=user.migrate_personal_files, args=([bool(request.json['skip_moved'])])).start()
+                # user.migrate_personal_files()
             to_migrate = []
             for i in user.drives:
                 if request.json[i.id+"-domigrate"]: 
@@ -76,7 +77,7 @@ def migrate_user_drives():
                         flash ("A task to migrate Drive {} is already running!".format(drive.name))
                         continue
                 dst = user.prepare_team_drive_for_migrate(drive)
-                thread = threading.Thread(target=user.migrate_drive, args=(drive, dst))
+                thread = threading.Thread(target=user.migrate_drive, args=(drive, bool(request.json['skip_moved']), dst))
                 thread.start()
                 drive.migrator_thread = thread
             return "OK", 200
@@ -106,5 +107,12 @@ def handle_internal_error(e):
     return render_template('show-err.html', err=trace[trace.rindex("File "):]), 500
 
 
+def open_browser():
+    time.sleep(1)  # Give the server time to start
+    print("Opening browser to http://127.0.0.1:5000/")
+    webbrowser.open_new("http://127.0.0.1:5000/")
+
+
 if __name__ == '__main__':
-    app.run()
+    threading.Thread(target=open_browser).start()
+    app.run(host="127.0.0.1", port=5000, debug=False)
