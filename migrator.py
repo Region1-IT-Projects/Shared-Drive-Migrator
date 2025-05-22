@@ -220,7 +220,7 @@ class User:
             if file.trashed or file.moved:
                 continue
             try:
-                access_id = self.dst.add_access(file.id, self.dst.address)
+                access_id = self.src.add_access(file.id, self.dst.address)
                 file_share_lookup[file.id] = access_id
             except g_api_errors.HttpError as e:
                 print("ERR: Cannot share file {}: {}".format(file.name, e))
