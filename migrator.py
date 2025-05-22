@@ -207,43 +207,87 @@ class User:
         self.src.mark_drive_moved(source_drive)
         return True
 
-    def migrate_personal_files(self, collate_loose_files: bool = True):
+    # share all files in personal drive to target user, return dict of file IDs to access IDs
+    def share_personal_files(self) -> dict[str, str]:
+        file_share_lookup = {}
         if len(self.src.personal_files) == 0:
-            print("Getting personal files...")
             self.src.get_personal_files()
+        if len(self.src.personal_files) == 0:
+            print("No personal files found in {}!".format(self.src.address))
+            return file_share_lookup
+        # share every file in personal drive to target user
+        for file in self.src.personal_files:
+            if file.trashed or file.moved:
+                continue
+            try:
+                access_id = self.dst.add_access(file.id, self.dst.address)
+                file_share_lookup[file.id] = access_id
+            except g_api_errors.HttpError as e:
+                print("ERR: Cannot share file {}: {}".format(file.name, e))
+        return file_share_lookup
+
+    # Strategy:
+    # src: recurse through all files in personal drive, sharing to dest user, return list of file (and folder) IDs
+    # dst: replicate folder structure (and collate loose if requested), keep dict of mappings old->new
+    # dst: make a copy of shared files, placing into corresponding folder structure
+    # src: un-share all shared files, mark as xfered
+    def migrate_personal_files(self):
+        files_and_shares = self.share_personal_files()
+        if len(files_and_shares) == 0:
+            print("No files to migrate!")
+            return
+        # get base path of source and target users' drives
+        try:
+            src_root = self.src.API.files().get(fileId="root", fields="id").execute()['id']
+            dst_root = self.dst.API.files().get(fileId="root", fields="id").execute()['id']
+        except ValueError:
+            print("ERR: Cannot get root folder ID!")
+            return
+        # create folder in target drive to store copied files
         folder_metadata = {
-            "name": "Migrated",
-            "mimeType": 'application/vnd.google-apps.folder'
+            "name": "Migrated Personal Files",
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [dst_root]
         }
-        new_root_id = self.src.API.files().create(body=folder_metadata, fields='id').execute()['id']
-        folder_metadata['parents'] = [new_root_id]
-        folder_metadata['name'] = 'Loose Files'
-        orphan_folder_id = self.src.API.files().create(body=folder_metadata, fields='id').execute()['id']
-        print("trying to move {} personal files".format(len(self.src.personal_files)))
-        skips = 0
-        for personal_file in self.src.personal_files:
-            if personal_file.parent is None:
-                # move orphan to orphan folder
-                if collate_loose_files:
-                    new_parent = orphan_folder_id
-                else:
-                    if personal_file.mimeType != 'application/vnd.google-apps.folder':
-                        continue # skip non-folder entities if collation is disabled
-                    new_parent = new_root_id
-                res = self.src.API.files().update(fileId=personal_file.id, addParents=new_parent, fields='parents').execute()
+        dst_folder_id = self.dst.API.files().create(body=folder_metadata)
+        migrated_files = set()
+        known_paths = {src_root: dst_folder_id}
+        # make a copy of the shared files in target user's drive
+        while len(migrated_files) < len(files_and_shares):
+            for file_id in files_and_shares:
+                if file_id in migrated_files:
+                    continue
+                # get file metadata
                 try:
-                    if res["parents"][0] == new_parent:
-                        self.src.personal_files.remove(personal_file)
-                        print("Personal file {} moved to {}".format(personal_file.id, new_parent))
-                    else:
-                        print("File {} did not move correctly! Now in: {}".format(personal_file.name, res["parents"][0]))
+                    file_metadata = self.src.API.files().get(fileId=file_id, fields="id, name, mimeType, parents").execute()
+                except g_api_errors.HttpError as e:
+                    print("ERR: Cannot get file {}: {}".format(file_id, e))
+                    continue
+                new_metadata = {
+                    "name": file_metadata['name'],
+                    "mimeType": file_metadata['mimeType'],
+                }
+                # check if parent is in known_paths
+                try:
+                    new_metadata['parents'] = [known_paths[file_metadata['parents'][0]]]
                 except KeyError:
-                    print("File {} failed to move!".format(personal_file.name))
-            else:
-                skips += 1
-                if personal_file.name == 'test1':
-                    print("found")
-        print("skipped {} personal files".format(skips))
+                    # parent is not known, pass
+                    continue
+                # check if file is a folder
+                if file_metadata['mimeType'] == 'application/vnd.google-apps.folder':
+                    new_folder_id = self.dst.API.files().create(body=new_metadata).execute()['id']
+                    known_paths[file_metadata['id']] = new_folder_id
+                else:
+                    # copy file to target drive
+                    self.dst.API.files().copy(fileId=file_id, body=file_metadata).execute()
+                migrated_files.add(file_id)
+        print("Copied {} files to target drive.".format(len(migrated_files)))
+        # un-share all files in personal drive
+        for file_id in files_and_shares:
+            try:
+                self.src.remove_access(file_id, files_and_shares[file_id])
+            except g_api_errors.HttpError as e:
+                print("ERR: Cannot un-share file {}: {}".format(file_id, e))
 
 class Migrator:
     users: list[User] = []

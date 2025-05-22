@@ -64,8 +64,8 @@ def migrate_user_drives():
     if request.method == 'POST':
         if isinstance(request.json, dict):
             if request.json['personal']:
-                #threading.Thread(target=user.migrate_personal_files, args=(request.json['collate_loose'])).start()
-                user.migrate_personal_files(True)
+                #threading.Thread(target=user.migrate_personal_files, args=()).start()
+                user.migrate_personal_files()
             to_migrate = []
             for i in user.drives:
                 if request.json[i.id+"-domigrate"]: 
