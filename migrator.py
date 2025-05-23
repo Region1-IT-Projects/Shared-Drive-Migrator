@@ -2,11 +2,13 @@ import csv
 import ssl
 import time
 import uuid
+from json import JSONDecodeError
 from threading import Thread
 from typing import TextIO
 import googleapiclient.discovery as g_discover
 import googleapiclient.errors as g_api_errors
 from google.oauth2 import service_account
+from google.auth.exceptions import RefreshError
 
 class GFile:
     moved = False
@@ -89,7 +91,13 @@ class Org:
         query_ret: dict = self.API.files().list(pageToken=token,
                                                 fields="nextPageToken, files(id, name, kind, mimeType, parents, owners, trashed, properties)",
                                                 **kwargs).execute()
-        file_list: list = query_ret['files']
+        try:
+            file_list: list = query_ret['files']
+        except KeyError:
+            if "error" in query_ret.keys():
+                print("ERR: {}".format(query_ret['error']))
+                return []
+            file_list = [query_ret]
         if 'nextPageToken' in query_ret.keys():
             file_list += self.__fetch_files(query_ret['nextPageToken'], **kwargs)
         return file_list
@@ -107,8 +115,17 @@ class Org:
             return self.populate_drive_files(drive, num_retries + 1)
         drive.set_files(file_list)
 
-    def get_personal_files(self):
-        file_list = self.__fetch_files(corpora="user", supportsAllDrives=False, includeItemsFromAllDrives=False)
+    def get_personal_files(self, num_retries = 0):
+        if num_retries > 3:
+            print("ERR: Too many retries for fetching personal files!")
+            return
+        try:
+            file_list = self.__fetch_files(corpora="user", supportsAllDrives=False, includeItemsFromAllDrives=False)
+        except ssl.SSLError as e:
+            print("SSL Error :", e)
+            # wait a bit and retry
+            time.sleep(1)
+            return self.get_personal_files(num_retries + 1)
         for i in file_list:
             f = GFile(i)
             if f.is_mine and not f.trashed:
@@ -333,6 +350,10 @@ class Migrator:
             self.src_creds = service_account.Credentials.from_service_account_file(credpath, scopes=self.SCOPE_LIST)
             return True
         except FileNotFoundError:
+            print("Credentials file not found.")
+            return False
+        except ValueError as e:
+            print("Invalid credentials file! Error: {}".format(e))
             return False
 
     def set_dst_creds(self, credpath: str) -> bool:
@@ -342,9 +363,15 @@ class Migrator:
         except FileNotFoundError:
             return False
 
-    def create_user(self, source_addr: str, dest_addr: str) -> User:
-        src_acc = Org(source_addr, self.src_creds)
-        dst_acc = Org(dest_addr, self.dst_creds)
+    def create_user(self, source_addr: str, dest_addr: str) -> User | None:
+        try:
+            src_acc = Org(source_addr, self.src_creds)
+            src_acc.get_drives()
+            dst_acc = Org(dest_addr, self.dst_creds)
+            dst_acc.get_drives()
+        except RefreshError:
+            print("Invalid credentials for source or destination account.")
+            return None
         u = User(src_acc, dst_acc)
         self.users.append(u)
         return u

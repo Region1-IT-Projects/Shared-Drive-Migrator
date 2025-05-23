@@ -52,7 +52,7 @@ def migrate_user():
         dst_user = request.form['destination']
         if mig.create_user(src_user, dst_user) is not None:
             return "OK", 200
-        flash("Failed to acquire user credentials. Please try again.")
+        flash("Invalid user credentials. Please try again.")
     return render_template('migrate-user.html', next_page="/migrate/user/drives/")
 
 
