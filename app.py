@@ -65,8 +65,9 @@ def migrate_user_drives():
     if request.method == 'POST':
         if isinstance(request.json, dict):
             if request.json['personal']:
-                threading.Thread(target=user.migrate_personal_files, args=([bool(request.json['skip_moved'])])).start()
-                # user.migrate_personal_files()
+                # threading.Thread(target=user.migrate_personal_files, args=([bool(request.json['skip_moved'])])).start()
+                user.migrate_personal_files(bool(request.json['skip_moved']))
+                flash("Personal files migration finished, moving to team drives.")
             to_migrate = []
             for i in user.drives:
                 if request.json[i.id+"-domigrate"]: 
