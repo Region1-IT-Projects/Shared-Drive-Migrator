@@ -9,63 +9,52 @@ Before this script can be used, both Google Workspaces must be configured to gra
 When prompted for the scopes for the API client in the Google Admin interface, enter `https://www.googleapis.com/auth/admin.directory.user.readonly` and `https://www.googleapis.com/auth/drive`.
 The interface will instruct you to enter the scopes comma-separated. This is not correct and will not work. Once you enter the first scope, another input field will appear for you to enter the other scope.
 
+### Python (Direct)
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/Region1-IT-Projects/Shared-Drive-Migrator
+   ```
+2. Change into the directory:
+   ```bash
+    cd Shared-Drive-Migrator
+    ```
+3. Install the required libraries:
+4. (Optional) Create a virtual environment:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+   ```
+5. Install the required libraries:
+   ```bash
+   pip install -r requirements.txt
+   ``` 
+### onefile executable
+1. Download the latest release from the [Releases page](https://github.com/Region1-IT-Projects/Shared-Drive-Migrator/releases).
+2. Run it!
+
+
 ## Usage
 
+### Python (Direct)
+```bash
+python app.py
 ```
-python migrator.py source_credentials.json destination_credentials.json [options]
+### onefile executable
+```bash
+./SharedDriveMigrator
+```
+or for Windows:
+```bash
+SharedDriveMigrator.exe
 ```
 
-**Arguments:**
-
-* `source_credentials.json`: Path to the JSON file containing the OAuth2 credentials for the source organization.
-* `destination_credentials.json`: Path to the JSON file containing the OAuth2 credentials for the destination organization.
-* `[options]`: (Optional) Command-line options to customize the migration process.
-
-**Options:**
-
-* `-i`, `--INTERACTIVE`: Interactive mode where the user enters the source and destination email addresses.
-* `-a`, `--automatic <csv_file>`: Automatic mode where user information is read from a CSV file.
-* `-y`, `--yes`: Assumes Yes for all confirmations.
-* `-q`, `--quiet`: print less information.
-
-**Example:**
-
-```
-python migrator.py source_credentials.json destination_credentials.json -a users.csv -v
-```
-### Automatic Mode
-To bulk-migrate shared drives owned by multiple users:
-1. Create a CSV file with the following format:
-
-```
-source_email,destination_email
-user1@example.com,user1@newexample.com
-user2@example.com,user2@newexample.com
-```
-2. Specify the CSV file path as an argument:
-
-```
-python migrator.py source_credentials.json destination_credentials.json -a users.csv
-```
+This should automatically open a browser window to the locally running web server. If it doesn't, you can manually navigate to `http://localhost:8080` in your browser.
 
 ## Requirements
 
 * Python 3.11 +
 * Google OAuth2 client library for Python
 * CSV library
-
-## Features
-
-* Migrates files between two Google Workspace organizations.
-* Supports both interactive and automatic mode.
-* Detects and handles deadlocks during file migration.
-* Provides progress information during the migration process.
-
-## Dependency Installation
-
-```
-pip install --upgrade google-api-python-client oauth2client
-```
 
 ## Notes
 

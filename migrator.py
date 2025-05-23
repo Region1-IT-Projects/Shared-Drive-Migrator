@@ -1,4 +1,6 @@
 import csv
+import ssl
+import time
 import uuid
 from threading import Thread
 from typing import TextIO
@@ -92,8 +94,17 @@ class Org:
             file_list += self.__fetch_files(query_ret['nextPageToken'], **kwargs)
         return file_list
 
-    def populate_drive_files(self, drive: GDrive):
-        file_list = self.__fetch_files(driveId=drive.id, supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="drive")
+    def populate_drive_files(self, drive: GDrive, num_retries = 0):
+        if num_retries > 3:
+            print("ERR: Too many retries for fetching drive {}'s files!".format(drive.name))
+            return
+        try:
+            file_list = self.__fetch_files(driveId=drive.id, supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="drive")
+        except ssl.SSLError as e:
+            print("SSL Error :", e)
+            # wait a bit and retry
+            time.sleep(1)
+            return self.populate_drive_files(drive, num_retries + 1)
         drive.set_files(file_list)
 
     def get_personal_files(self):

@@ -99,7 +99,7 @@ def migrate_progress(drive_id):
 @app.route('/migrate/success/')
 def migrate_success():
     flash("Migration completed successfully.")
-    return redirect(url_for('modeselect'))
+    return redirect(url_for('migrate_user'))
 
 @app.errorhandler(500)
 def handle_internal_error(e):
