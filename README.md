@@ -48,13 +48,8 @@ or for Windows:
 SharedDriveMigrator.exe
 ```
 
-This should automatically open a browser window to the locally running web server. If it doesn't, you can manually navigate to `http://localhost:8080` in your browser.
+This should automatically open a browser window to the locally running web server. If it doesn't, you can manually navigate to http://localhost:5000 in your browser.
 
-## Requirements
-
-* Python 3.11 +
-* Google OAuth2 client library for Python
-* CSV library
 
 ## Notes
 
