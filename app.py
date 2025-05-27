@@ -33,13 +33,20 @@ def setup(stage: str):
         if stage == "source":
             next_page = "/setup/destination"
         else:
-            next_page = "/migrate/user"
+            next_page = url_for("modeselect")
         return render_template("setup.html", stage=stage, nextpage=next_page)
 
 
 @app.route('/modeselect/')
 def modeselect():
     return render_template("modes.html")
+
+@app.route('/migrate/bulk/', methods=['GET', 'POST'])
+def migrate_bulk():
+    if mig.src_creds is None or mig.dst_creds is None:
+        flash("Please setup source and destination credentials.")
+        return redirect(url_for('setup', stage="source"))
+    return render_template('migrate-bulk.html', next_page="/migrate/bulk/drives/")
 
 
 @app.route('/migrate/user/', methods=['GET', 'POST'])

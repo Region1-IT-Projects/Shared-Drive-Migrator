@@ -1,0 +1,145 @@
+{% extends 'base.html' %}
+{% block head %}
+{{ super() }}
+<script>
+    tailwind.config = {
+        darkMode: 'class',
+        theme: {
+            extend: {
+                colors: {
+                    dark: {
+                        100: '#1a1a1a',
+                        200: '#2a2a2a',
+                        300: '#3a3a3a',
+                    }
+                }
+            }
+        }
+    }
+</script>
+<style>
+    .drag-drop-area {
+        border: 2px dashed #4a5568;
+        transition: all 0.3s ease;
+    }
+
+    .drag-drop-area.dragover {
+        background-color: rgba(74, 85, 104, 0.2);
+        border-color: #718096;
+    }
+</style>
+{% endblock %}
+{% block content %}
+
+<div class="container mx-auto px-4 flex items-center justify-center">
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold mb-6 text-center">Bulk User Migration</h1>
+        <p class="text-center mb-8">Drag and drop your CSV file of account mappings. Click <a href="">here</a> for an example.</p>
+        <div id="dropArea" class="drag-drop-area p-12 rounded-lg text-center cursor-pointer">
+            <p class="text-xl mb-4">Drop your JSON keyfile (or click) here</p>
+            <p class="text-sm text-gray-400">Don't worry, it won't leave your computer.</p>
+        </div>
+        <input id="fileInput" type="file" accept=".json" style="display: none;"/>
+        <div class="text-center mt-8">
+            <button id="continue_btn"
+                    class="px-8 py-3 bg-gray-500 text-gray-900 rounded-full text-lg font-semibold hover:bg-gray-400 transition duration-300 cursor-not-allowed"
+                    disabled>
+                Continue
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+    const dropArea = document.getElementById('dropArea');
+    const button = document.getElementById('continue_btn');
+    const fileInput = document.getElementById('fileInput');
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        dropArea.addEventListener(eventName, preventDefaults, false);
+    });
+    button.onclick = function () {
+        location.href = "{{ nextpage }}";
+    };
+
+    dropArea.addEventListener('click', () => {
+        fileInput.click();
+    });
+
+    // Handle file selection via file input
+    fileInput.addEventListener('change', () => {
+        const files = fileInput.files;
+
+        // Ensure only one file is allowed
+        if (files.length > 1) {
+            alert('Please select only one file.');
+            return;
+        }
+
+        if (files.length === 1) {
+            uploadFile(files[0]);
+        }
+    });
+
+    function preventDefaults(e) {
+        e.preventDefault();
+        e.stopPropagation();
+    }
+
+    ['dragenter', 'dragover'].forEach(eventName => {
+        dropArea.addEventListener(eventName, highlight, false);
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+        dropArea.addEventListener(eventName, unhighlight, false);
+    });
+
+    function highlight(e) {
+        dropArea.classList.add('dragover');
+    }
+
+    function unhighlight(e) {
+        dropArea.classList.remove('dragover');
+    }
+
+    dropArea.addEventListener('drop', handleDrop, false);
+
+    function handleDrop(e) {
+        e.preventDefault(); // Prevent the default browser behavior
+        const dt = e.dataTransfer;
+        const files = dt.files;
+
+        // Ensure only one file is allowed
+        if (files.length > 1) {
+            alert('Please upload only one file at a time.');
+            return;
+        }
+        // Pass the single file to the upload function
+        uploadFile(files[0]);
+    }
+
+    function uploadFile(file) {
+        const formData = new FormData();
+        formData.append('file', file); // Append file to the FormData object
+
+        // Send the file to the `/setup` endpoint via POST
+        fetch('/setup/{{ stage }}', {
+            method: 'POST',
+            body: formData,
+        })
+            .then(response => {
+                if (response.ok) {
+                    button.disabled = false
+                    button.classList.remove('bg-gray-500', 'cursor-not-allowed', 'hover:bg-gray-400');
+                    button.classList.add('bg-green-500', 'cursor-pointer', 'hover:bg-green-400');
+                } else {
+                    alert('Failed to upload the file.');
+                }
+            })
+            .catch(error => {
+                console.error('Error uploading file:', error);
+                alert('An error occurred while uploading the file.');
+            });
+    }
+</script>
+
+{% endblock %}
