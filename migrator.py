@@ -319,7 +319,6 @@ class User:
                 print("ERR: Cannot un-share file {}: {}".format(file_id, e))
 
 class Migrator:
-    users: list[User] = []
     src_creds = None
     dst_creds = None
     SCOPE_LIST = ["https://www.googleapis.com/auth/drive",
@@ -340,6 +339,9 @@ class Migrator:
                 if check_email_validity(addr):
                     temp_row.append(addr.strip().casefold())
                 else:
+                    if index == 0:
+                        # assume this is a header row
+                        continue
                     return "{} is not a valid email address!".format(addr)
             if len(temp_row) == 2:
                 accounts[temp_row[0]] = temp_row[1]
@@ -373,5 +375,54 @@ class Migrator:
             print("Invalid credentials for source or destination account.")
             return None
         u = User(src_acc, dst_acc)
-        self.users.append(u)
         return u
+
+class BulkMigration:
+    def __init__(self, csv_path:str, mig: Migrator, skip_moved: bool, do_personal: bool, do_shared: bool):
+        self.migrator = mig
+        self.skip_moved = skip_moved
+        self.do_personal = do_personal
+        self.do_shared = do_shared
+        # Read CSV file
+        with open(csv_path, 'r') as csv_file:
+            self.accounts = self.migrator.ingest_csv(csv_file)
+        self.workers = {}
+
+    def start_migration(self):
+        """Spawn threads for each user migration"""
+        for src, dst in self.accounts.items():
+            user = self.migrator.create_user(src, dst)
+            if user is None:
+                print(f"Failed to create user for {src} -> {dst}")
+                continue
+            worker = Thread(target=self.migrate_user, args=(user,))
+            worker.start()
+            self.workers[user.src.address] = worker
+        print(f"Started migration for {len(self.workers)} users.")
+
+    def migrate_user(self, user: User):
+        print("Starting migration for mapping {} -> {}".format(user.src.address, user.dst.address))
+        """Migrate a single user"""
+        if self.do_personal:
+            user.migrate_personal_files(self.skip_moved)
+            print("Finished migrating personal files for {}".format(user.src.address))
+        if self.do_shared:
+            drives = user.get_owned_team_drives()
+            for idx, drive in enumerate(drives):
+                target_id = user.prepare_team_drive_for_migrate(drive)
+                if target_id is None:
+                    print(f"Drive {drive.name} already migrated or not initialized.")
+                    continue
+                user.migrate_drive(drive, self.skip_moved, target_id)
+                print(f"Finished migrating drive {drive.name} for {user.src.address} ({idx}/{len(drives)})")
+        print(f"Migration for {user.src.address} completed.")
+
+    def get_progress(self):
+        """Get the progress of all worker threads"""
+        statuses = {}
+        for worker in self.workers:
+            if self.workers[worker].is_alive():
+                statuses[worker] = "In Progress"
+            else:
+                statuses[worker] = "Completed"
+        return statuses

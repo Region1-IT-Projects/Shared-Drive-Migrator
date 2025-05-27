@@ -1,3 +1,4 @@
+import json
 import logging
 from flask import Flask, render_template, flash, request, redirect, url_for
 from migrator import *
@@ -5,12 +6,16 @@ import tempfile
 import traceback
 import threading
 import time
+import os
 import webbrowser
 app = Flask(__name__)  # Flask constructor
-logging.getLogger('werkzeug').addHandler(logging.NullHandler())
+# logging.getLogger('werkzeug').addHandler(logging.NullHandler())
 app.secret_key = 'supersecret'
 # globals
 mig = Migrator()
+tempfiles = []
+bulkMigration: BulkMigration | None = None
+cur_user: User | None = None
 
 @app.route('/')
 def hello():
@@ -22,6 +27,7 @@ def setup(stage: str):
     if request.method == 'POST':
         # handle file upload
         tmp = tempfile.NamedTemporaryFile(delete=False)
+        tempfiles.append(tmp.name)
         request.files['file'].save(tmp.name)
         if stage == "source":
             mig.set_src_creds(tmp.name)
@@ -43,21 +49,63 @@ def modeselect():
 
 @app.route('/migrate/bulk/', methods=['GET', 'POST'])
 def migrate_bulk():
+    global bulkMigration
     if mig.src_creds is None or mig.dst_creds is None:
         flash("Please setup source and destination credentials.")
         return redirect(url_for('setup', stage="source"))
-    return render_template('migrate-bulk.html', next_page="/migrate/bulk/drives/")
+    if request.method == 'POST':
+        # save CSV file to temporary file
+        tmp = tempfile.NamedTemporaryFile(delete=True)
+        request.files['file'].save(tmp.name)
+        cbdata = json.loads(request.form.get('checkboxData', '{}'))
+        skip_moved = cbdata.get('skip_moved', 'false')
+        migrate_personal = cbdata.get('do_personal', 'false')
+        migrate_shared = cbdata.get('do_shared', 'false')
+        if bulkMigration is not None:
+            print("Error: Bulk migration already in progress!")
+            flash("Bulk migration already in progress!")
+            return "Error: Bulk migration already in progress!", 400
+        try:
+            bulkMigration = BulkMigration(tmp.name, mig, bool(skip_moved), bool(migrate_personal), bool(migrate_shared))
+        except Exception as e:
+            flash(f"Error processing CSV file: {str(e)}")
+            print("Error processing CSV file:", e)
+            bulkMigration = None
+            return redirect(url_for('migrate_bulk'))
+        bulkMigration.start_migration()
+        return "OK", 200
+    return render_template('migrate-bulk.html', nextpage="/migrate/bulk/progress/")
+
+@app.route('/migrate/bulk/progress/', methods=['GET'])
+def migrate_bulk_progress():
+    if not isinstance(bulkMigration, BulkMigration):
+        flash("No bulk migration in progress! ({})".format(bulkMigration))
+        return redirect(url_for('migrate_bulk'))
+    else:
+        return render_template('bulk-progress.html')
+
+@app.route('/migrate/bulk/progress/internal', methods=['GET'])
+def migrate_bulk_progress_internal():
+    if not isinstance(bulkMigration, BulkMigration):
+        return "No bulk migration in progress", 404
+    progress = bulkMigration.get_progress()
+    if progress is None:
+        return "No progress data available", 404
+    # return progress as JSON
+    return json.dumps(progress), 200, {'Content-Type': 'application/json'}
 
 
 @app.route('/migrate/user/', methods=['GET', 'POST'])
 def migrate_user():
+    global cur_user
     if mig.src_creds is None or mig.dst_creds is None:
         flash("Please setup source and destination credentials.")
         return redirect(url_for('setup', stage="source"))
     if request.method == 'POST':
         src_user = request.form['source']
         dst_user = request.form['destination']
-        if mig.create_user(src_user, dst_user) is not None:
+        cur_user = mig.create_user(src_user, dst_user)
+        if cur_user is not None:
             return "OK", 200
         flash("Invalid user credentials. Please try again.")
     return render_template('migrate-user.html', next_page="/migrate/user/drives/")
@@ -65,10 +113,10 @@ def migrate_user():
 
 @app.route('/migrate/user/drives/', methods=['GET', 'POST'])
 def migrate_user_drives():
-    if len(mig.users) == 0:
+    if not isinstance(cur_user, User):
         flash("Please enter user information first.")
         return redirect(url_for('migrate_user'))
-    user = mig.users[-1]
+    user: User = cur_user
     if request.method == 'POST':
         if isinstance(request.json, dict):
             if request.json['personal']:
@@ -96,8 +144,8 @@ def migrate_user_drives():
 
 @app.route('/migrate/progress/<drive_id>/')
 def migrate_progress(drive_id):
-    for user in mig.users:
-        for drive in user.drives:
+    if cur_user is User:
+        for drive in cur_user.drives:
             if drive.id == drive_id:
                 if len(drive.files) != 0 and not drive.migrator_thread.is_alive():
                     return "Migrator Thread Crashed", 500
@@ -123,4 +171,14 @@ def open_browser():
 
 if __name__ == '__main__':
     threading.Thread(target=open_browser).start()
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    try:
+        app.run(host="127.0.0.1", port=5000, debug=False)
+    except KeyboardInterrupt:
+        print("Server stopped by user.")
+        # Clean up temporary files on exit
+    for tmp in tempfiles:
+        try:
+            os.remove(tmp)
+        except Exception as e:
+            print(f"Error removing temporary file {tmp}: {e}")
+    print("Thanks for using Drive Migrator!")
