@@ -9,7 +9,7 @@ import time
 import os
 import webbrowser
 app = Flask(__name__)  # Flask constructor
-# logging.getLogger('werkzeug').addHandler(logging.NullHandler())
+logging.getLogger('werkzeug').addHandler(logging.NullHandler())
 app.secret_key = 'supersecret'
 # globals
 mig = Migrator()

@@ -128,7 +128,7 @@ class Org:
             return self.get_personal_files(num_retries + 1)
         for i in file_list:
             f = GFile(i)
-            if f.is_mine and not f.trashed:
+            if f.is_mine and not f.trashed and f.mimeType != 'application/vnd.google-apps.shortcut':
                 self.personal_files.append(f)
         return self.personal_files
 
@@ -211,6 +211,10 @@ class User:
                         "mimeType": file.mimeType,
                         "parents": [path_map[file.parent]]
                     }
+                    if file.mimeType == 'application/vnd.google-apps.shortcut':
+                        # skip shortcuts, they are not copied
+                        source_drive.files.pop(index)
+                        continue
                     if file.mimeType == 'application/vnd.google-apps.folder':
                         # 'file' is actually a folder and cannot be copied, make a folder with same name instead
                         new_id = self.dst.API.files().create(body=file_metadata, supportsAllDrives=True,
@@ -250,7 +254,7 @@ class User:
                 access_id = self.src.add_access(file.id, self.dst.address)
                 file_share_lookup[file.id] = access_id
             except g_api_errors.HttpError as e:
-                print("ERR: Cannot share file {}: {}".format(file.name, e))
+                print("Warning: Cannot share file {}: {}".format(file.name, e))
         return file_share_lookup
 
     # Strategy:
