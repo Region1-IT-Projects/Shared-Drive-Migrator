@@ -1,5 +1,8 @@
+VERSION = "2.1.1"
 import json
 import logging
+
+import requests
 from flask import Flask, render_template, flash, request, redirect, url_for
 from migrator import *
 import tempfile
@@ -16,9 +19,14 @@ mig = Migrator()
 tempfiles = []
 bulkMigration: BulkMigration | None = None
 cur_user: User | None = None
+do_update_warning = False
 
 @app.route('/')
 def hello():
+    global do_update_warning
+    if do_update_warning:
+        flash("This software is not up to date! Please download the latest from <a href=https://github.com/Region1-IT-Projects/Shared-Drive-Migrator/releases/latest>github</a>.")
+        do_update_warning = False
     return render_template("index.html")
 
 
@@ -55,7 +63,7 @@ def migrate_bulk():
         return redirect(url_for('setup', stage="source"))
     if request.method == 'POST':
         # save CSV file to temporary file
-        tmp = tempfile.NamedTemporaryFile(delete=True)
+        tmp = tempfile.NamedTemporaryFile(delete=False)
         request.files['file'].save(tmp.name)
         cbdata = json.loads(request.form.get('checkboxData', '{}'))
         skip_moved = cbdata.get('skip_moved', 'false')
@@ -168,8 +176,26 @@ def open_browser():
     print("Opening browser to http://127.0.0.1:5000/")
     webbrowser.open_new("http://127.0.0.1:5000/")
 
+def get_latest_release_tag(repo):
+    url = f"https://api.github.com/repos/{repo}/releases/latest"
+    response = requests.get(url)
+    response.raise_for_status()
+    return response.json()["tag_name"]
+
 
 if __name__ == '__main__':
+    try:
+        latest_ver = get_latest_release_tag("Region1-IT-Projects/Shared-Drive-Migrator")
+    except requests.exceptions.HTTPError:
+        print("WARNING: unable to get latest software version!")
+    else:
+        if latest_ver.strip().lower() != VERSION.lower():
+            print("\n\n")
+            print("YOU ARE NOT RUNNING THE LATEST SOFTWARE VERSION".center(os.get_terminal_size().columns,'='))
+            print("Latest version: {} | Current version: {}".format(latest_ver, VERSION).center(os.get_terminal_size().columns,' '))
+            print("Download latest from https://github.com/Region1-IT-Projects/Shared-Drive-Migrator/releases/latest".center(os.get_terminal_size().columns,' '))
+            print("\n\n")
+            do_update_warning = True
     threading.Thread(target=open_browser).start()
     try:
         app.run(host="127.0.0.1", port=5000, debug=False)
@@ -181,4 +207,4 @@ if __name__ == '__main__':
             os.remove(tmp)
         except Exception as e:
             print(f"Error removing temporary file {tmp}: {e}")
-    print("Thanks for using Drive Migrator!")
+    print("\nThanks for using Drive Migrator!")
