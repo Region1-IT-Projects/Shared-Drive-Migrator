@@ -3,7 +3,7 @@ import json
 import logging
 
 import requests
-from flask import Flask, render_template, flash, request, redirect, url_for
+from flask import Flask, render_template, flash, request, redirect, url_for, send_from_directory
 from migrator import *
 import tempfile
 import traceback
@@ -18,6 +18,7 @@ app.secret_key = 'supersecret'
 mig = Migrator()
 tempfiles = []
 bulkMigration: BulkMigration | None = None
+
 cur_user: User | None = None
 do_update_warning = False
 
@@ -62,27 +63,53 @@ def migrate_bulk():
         flash("Please setup source and destination credentials.")
         return redirect(url_for('setup', stage="source"))
     if request.method == 'POST':
-        # save CSV file to temporary file
-        tmp = tempfile.NamedTemporaryFile(delete=False)
-        request.files['file'].save(tmp.name)
-        cbdata = json.loads(request.form.get('checkboxData', '{}'))
-        skip_moved = cbdata.get('skip_moved', 'false')
-        migrate_personal = cbdata.get('do_personal', 'false')
-        migrate_shared = cbdata.get('do_shared', 'false')
-        if bulkMigration is not None:
-            print("Error: Bulk migration already in progress!")
-            flash("Bulk migration already in progress!")
-            return "Error: Bulk migration already in progress!", 400
-        try:
-            bulkMigration = BulkMigration(tmp.name, mig, bool(skip_moved), bool(migrate_personal), bool(migrate_shared))
-        except Exception as e:
-            flash(f"Error processing CSV file: {str(e)}")
-            print("Error processing CSV file:", e)
-            bulkMigration = None
-            return redirect(url_for('migrate_bulk'))
-        bulkMigration.start_migration()
-        return "OK", 200
+        if len(request.files):
+            # save CSV file to temporary file
+            tmp = tempfile.NamedTemporaryFile(delete=False)
+            request.files['file'].save(tmp.name)
+            if bulkMigration is not None:
+                print("Error: Bulk migration already in progress!")
+                flash("Bulk migration already in progress!")
+                return "Error: Bulk migration already in progress!", 400
+            try:
+                bulkMigration = BulkMigration(tmp.name, mig)
+            except Exception as e:
+                flash(f"Error processing CSV file: {str(e)}")
+                print("Error processing CSV file:", e)
+                bulkMigration = None
+                return redirect(url_for('migrate_bulk'))
+        else:
+            print("did not understand POSTed data: ",request)
+            return "BAD REQUEST",400
     return render_template('migrate-bulk.html', nextpage="/migrate/bulk/progress/")
+
+@app.route('/migrate/bulk/start', methods=['POST'])
+def start_bulk_migrate():
+    if not isinstance(bulkMigration, BulkMigration):
+        print("Got command to start migration with no instance ready!!")
+        return "Bad Request: Missing Precondition", 412
+    if bulkMigration.is_running():
+        print("Got command to start migration with already running!!")
+        flash("A migration is already running!")
+        return "Bad Request: Already running", 409
+    cbdata = json.loads(request.form.get('checkboxData', '{}'))
+    skip_moved = cbdata.get('skip_moved', 'false')
+    migrate_personal = cbdata.get('do_personal', 'false')
+    migrate_shared = cbdata.get('do_shared', 'false')
+    bulkMigration.start_migration(skip_moved, migrate_personal, migrate_shared)
+    print("Got start command for bulk migration")
+    return "OK", 200
+
+@app.route('/migrate/bulk/abort', methods=['POST'])
+def abort_bulk_migrate():
+    global bulkMigration
+    if not isinstance(bulkMigration, BulkMigration):
+        print("Got command to abort migration with no instance running!!")
+        return "Bad Request: Missing Precondition", 412
+    bulkMigration.stop()
+    bulkMigration = None
+    flash("Aborted bulk migration")
+    return "OK", 200
 
 @app.route('/migrate/bulk/progress/', methods=['GET'])
 def migrate_bulk_progress():
@@ -170,6 +197,10 @@ def handle_internal_error(e):
     trace = traceback.format_exc()
     return render_template('show-err.html', err=trace[trace.rindex("File "):]), 500
 
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(os.path.join(app.root_path, 'static'),
+                               'icon.png', mimetype='image/png')
 
 def open_browser():
     time.sleep(1)  # Give the server time to start

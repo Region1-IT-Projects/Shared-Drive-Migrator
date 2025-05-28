@@ -73,7 +73,7 @@ class Org:
 
     def add_access(self, file_id: str, email: str, role: str = "writer"):
         return self.API.permissions().create(fileId=file_id, body={"emailAddress": email, "role": role, "type": "user"},
-                                             supportsAllDrives=True).execute()['id']
+                                             supportsAllDrives=True, sendNotificationEmail=False).execute()['id']
 
     def remove_access(self, file_id: str, access_id: str):
         self.API.permissions().delete(fileId=file_id, permissionId=access_id, supportsAllDrives=True).execute()
@@ -382,37 +382,52 @@ class Migrator:
         return u
 
 class BulkMigration:
-    def __init__(self, csv_path:str, mig: Migrator, skip_moved: bool, do_personal: bool, do_shared: bool):
+    def __init__(self, csv_path:str, mig: Migrator):
+        self.do_shared = False
+        self.do_personal = False
+        self.skip_moved = False
         self.migrator = mig
-        self.skip_moved = skip_moved
-        self.do_personal = do_personal
-        self.do_shared = do_shared
+        self.running = False
         # Read CSV file
         with open(csv_path, 'r') as csv_file:
             self.accounts = self.migrator.ingest_csv(csv_file)
         self.workers = {}
 
-    def start_migration(self):
+    def is_running(self):
+        return self.running
+
+    def start_migration(self, skip_moved: bool, do_personal: bool, do_shared: bool):
         """Spawn threads for each user migration"""
+        # set up control flags
+        self.skip_moved = skip_moved
+        self.do_personal = do_personal
+        self.do_shared = do_shared
+        self.running = True
         for src, dst in self.accounts.items():
-            user = self.migrator.create_user(src, dst)
-            if user is None:
-                print(f"Failed to create user for {src} -> {dst}")
-                continue
-            worker = Thread(target=self.migrate_user, args=(user,))
+            worker = Thread(target=self.migrate_user, args=(src,dst))
             worker.start()
-            self.workers[user.src.address] = worker
+            self.workers[src] = worker
         print(f"Started migration for {len(self.workers)} users.")
 
-    def migrate_user(self, user: User):
-        print("Starting migration for mapping {} -> {}".format(user.src.address, user.dst.address))
+    def migrate_user(self, src: str, dst: str):
+        print("Starting migration for mapping {} -> {}".format(src, dst))
         """Migrate a single user"""
+        user = self.migrator.create_user(src, dst)
+        if user is None:
+            print(f"Failed to create user for {src} -> {dst}! Aborting...")
+            return
         if self.do_personal:
+            if not self.running:
+                return
             user.migrate_personal_files(self.skip_moved)
             print("Finished migrating personal files for {}".format(user.src.address))
+            if not self.running:
+                return
         if self.do_shared:
             drives = user.get_owned_team_drives()
             for idx, drive in enumerate(drives):
+                if not self.running:
+                    return
                 target_id = user.prepare_team_drive_for_migrate(drive)
                 if target_id is None:
                     print(f"Drive {drive.name} already migrated or not initialized.")
@@ -420,6 +435,9 @@ class BulkMigration:
                 user.migrate_drive(drive, self.skip_moved, target_id)
                 print(f"Finished migrating drive {drive.name} for {user.src.address} ({idx}/{len(drives)})")
         print(f"Migration for {user.src.address} completed.")
+
+    def stop(self):
+        self.running = False
 
     def get_progress(self):
         """Get the progress of all worker threads"""

@@ -34,8 +34,33 @@
     <h1 class="text-3xl font-bold mb-6 text-center">Migration In Progress:</h1>
     <div id="progress-container" class="space-y-4"></div>
 </div>
+<div class="text-center mt-8">
+            <button id="stop_btn"
+                    class="px-8 py-3 bg-red-800 text-gray-400 rounded-full text-lg font-semibold hover:bg-red-700 transition duration-300">
+                Abort
+            </button>
+        </div>
 
 <script>
+    const button = document.getElementById('stop_btn');
+    button.onclick = async function () {
+        await sendAbort()
+        location.href = "/";
+    };
+    async function sendAbort(){
+
+            await fetch('/migrate/bulk/abort', {
+            method: 'POST',
+        })
+            .then(response => {
+                return response.ok;
+            })
+            .catch(error => {
+                console.error('Error sending abort:', error);
+                return false;
+            });
+        return false
+    }
     async function fetchProgress() {
         try {
             const response = await fetch('/migrate/bulk/progress/internal');
