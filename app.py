@@ -1,7 +1,5 @@
-VERSION = "2.1.2"
+VERSION = "2.2.0"
 import json
-import logging
-
 import requests
 from flask import Flask, render_template, flash, request, redirect, url_for, send_from_directory
 from migrator import *
@@ -12,7 +10,19 @@ import time
 import os
 import webbrowser
 app = Flask(__name__)  # Flask constructor
-logging.getLogger('werkzeug').addHandler(logging.NullHandler())
+logging.getLogger('werkzeug').addHandler(logging.NullHandler()) # Suppress werkzeug logging
+logger = logging.getLogger(__name__) # Create a logger for this module
+logger.setLevel(logging.INFO) # Set the logger level to INFO
+# Create a file handler to log to a file
+logger_tmpfile = tempfile.NamedTemporaryFile(delete=False, delete_on_close=False)
+file_handler = logging.FileHandler(logger_tmpfile.name)
+file_handler.setLevel(logging.DEBUG) # Set the file handler level to INFO
+# Create a formatter and set it for the file handler
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+# Add the file handler to the logger
+logger.addHandler(file_handler)
+print("Application log file: {}".format(logger_tmpfile.name))
 app.secret_key = 'supersecret'
 # globals
 mig = Migrator()
@@ -21,6 +31,10 @@ bulkMigration: BulkMigration | None = None
 
 cur_user: User | None = None
 do_update_warning = False
+
+@app.context_processor
+def inject_logfile_name():
+    return dict(logfile_name=logger_tmpfile.name)
 
 @app.route('/')
 def hello():
@@ -39,10 +53,19 @@ def setup(stage: str):
         tempfiles.append(tmp.name)
         request.files['file'].save(tmp.name)
         if stage == "source":
-            mig.set_src_creds(tmp.name)
+            if mig.set_src_creds(tmp.name):
+                flash("Source credentials set successfully.")
+                return "File uploaded successfully", 200
+            else:
+                flash("Failed to set source credentials.")
+                return "Error setting source credentials", 400
         else:
-            mig.set_dst_creds(tmp.name)
-        return "File uploaded successfully", 200
+            if mig.set_dst_creds(tmp.name):
+                flash("Destination credentials set successfully.")
+                return "File uploaded successfully", 200
+            else:
+                flash("Failed to set destination credentials.")
+                return "Error setting destination credentials", 400
 
     else:
         if stage == "source":
@@ -68,28 +91,28 @@ def migrate_bulk():
             tmp = tempfile.NamedTemporaryFile(delete=False)
             request.files['file'].save(tmp.name)
             if bulkMigration is not None:
-                print("Error: Bulk migration already in progress!")
+                logger.error("Cannot start migration: Bulk migration already in progress!")
                 flash("Bulk migration already in progress!")
                 return "Error: Bulk migration already in progress!", 400
             try:
                 bulkMigration = BulkMigration(tmp.name, mig)
             except Exception as e:
                 flash(f"Error processing CSV file: {str(e)}")
-                print("Error processing CSV file:", e)
+                logger.error("Failed to process CSV file:", e)
                 bulkMigration = None
                 return redirect(url_for('migrate_bulk'))
         else:
-            print("did not understand POSTed data: ",request)
+            logger.error("did not understand POSTed data: ",request)
             return "BAD REQUEST",400
     return render_template('migrate-bulk.html', nextpage="/migrate/bulk/progress/")
 
 @app.route('/migrate/bulk/start', methods=['POST'])
 def start_bulk_migrate():
     if not isinstance(bulkMigration, BulkMigration):
-        print("Got command to start migration with no instance ready!!")
+        logger.warning("Got command to start migration with no instance ready!!")
         return "Bad Request: Missing Precondition", 412
     if bulkMigration.is_running():
-        print("Got command to start migration with already running!!")
+        logger.warning("Got command to start migration with already running!!")
         flash("A migration is already running!")
         return "Bad Request: Already running", 409
     cbdata = json.loads(request.form.get('checkboxData', '{}'))
@@ -97,14 +120,14 @@ def start_bulk_migrate():
     migrate_personal = cbdata.get('do_personal', 'false')
     migrate_shared = cbdata.get('do_shared', 'false')
     bulkMigration.start_migration(skip_moved, migrate_personal, migrate_shared)
-    print("Got start command for bulk migration")
+    logger.info("Got start command for bulk migration")
     return "OK", 200
 
 @app.route('/migrate/bulk/abort', methods=['POST'])
 def abort_bulk_migrate():
     global bulkMigration
     if not isinstance(bulkMigration, BulkMigration):
-        print("Got command to abort migration with no instance running!!")
+        logger.warning("Got command to abort migration with no instance running!!")
         return "Bad Request: Missing Precondition", 412
     bulkMigration.stop()
     bulkMigration = None
@@ -204,7 +227,7 @@ def favicon():
 
 def open_browser():
     time.sleep(1)  # Give the server time to start
-    print("Opening browser to http://127.0.0.1:5000/")
+    logger.info("Opening browser to http://127.0.0.1:5000/")
     webbrowser.open_new("http://127.0.0.1:5000/")
 
 def get_latest_release_tag(repo):
@@ -215,10 +238,11 @@ def get_latest_release_tag(repo):
 
 
 if __name__ == '__main__':
+
     try:
         latest_ver = get_latest_release_tag("Region1-IT-Projects/Shared-Drive-Migrator")
     except requests.exceptions.HTTPError:
-        print("WARNING: unable to get latest software version!")
+        logger.warning("Unable to get latest software version!")
     else:
         if latest_ver.strip().lower() != VERSION.lower():
             print("\n\n")
@@ -231,11 +255,12 @@ if __name__ == '__main__':
     try:
         app.run(host="127.0.0.1", port=5000, debug=False)
     except KeyboardInterrupt:
-        print("Server stopped by user.")
+        logger.info("Server stopped by user.")
+        print("Application log file: {}".format(logger_tmpfile.name))
         # Clean up temporary files on exit
     for tmp in tempfiles:
         try:
             os.remove(tmp)
         except Exception as e:
-            print(f"Error removing temporary file {tmp}: {e}")
+            logger.error(f"Failed to remove temporary file {tmp}: {e}")
     print("\nThanks for using Drive Migrator!")
