@@ -62,53 +62,57 @@
         return false
     }
     async function fetchProgress() {
-        try {
-            const response = await fetch('/migrate/bulk/progress/internal');
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const data = await response.json();
+    try {
+        const response = await fetch('/migrate/bulk/progress/internal');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
 
-            const container = document.getElementById('progress-container');
-            container.innerHTML = ''; // Clear previous entries
+        const container = document.getElementById('progress-container');
+        container.innerHTML = ''; // Clear previous entries
 
-            for (const [user, status] of Object.entries(data)) {
-                const isInProgress = status === "in progress";
+        for (const entry of data) {
+            const { user, status, progress } = entry;
 
-                const wrapper = document.createElement('div');
-                wrapper.className = `flex items-center justify-between ${isInProgress ? 'bg-blue-800' : 'bg-gray-600'} p-4 rounded-lg`;
+            const showSpinner = (progress !== null && progress < 100) || status === "Personal";
 
-                const nameSpan = document.createElement('span');
-                nameSpan.textContent = user;
+            const wrapper = document.createElement('div');
+            wrapper.className = `flex items-center justify-between ${showSpinner ? 'bg-blue-800' : 'bg-gray-600'} p-4 rounded-lg`;
 
-                const statusDiv = document.createElement('div');
-                statusDiv.className = 'flex items-center';
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = user;
 
-                if (isInProgress) {
-                    statusDiv.innerHTML = `
-                        <svg class="animate-spin h-6 w-6 text-white" xmlns="http://www.w3.org/2000/svg" fill="none"
-                             viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor"
-                                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                    `;
-                }
+            const statusDiv = document.createElement('div');
+            statusDiv.className = 'flex items-center';
 
-                const statusText = document.createElement('p');
-                statusText.className = 'text-sm text-gray-400 ml-2';
-                statusText.textContent = status;
-
-                statusDiv.appendChild(statusText);
-                wrapper.appendChild(nameSpan);
-                wrapper.appendChild(statusDiv);
-
-                container.appendChild(wrapper);
+            if (showSpinner) {
+                statusDiv.innerHTML = `
+                    <svg class="animate-spin h-6 w-6 text-white" xmlns="http://www.w3.org/2000/svg" fill="none"
+                         viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor"
+                              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                `;
             }
-        } catch (err) {
-            console.error('Failed to fetch progress:', err);
-        }
-    }
 
+            const statusText = document.createElement('p');
+            statusText.className = 'text-sm text-gray-400 ml-2';
+            statusText.textContent = progress !== null
+                ? `${status} (${progress.toFixed(1)}%)`
+                : status;
+
+            statusDiv.appendChild(statusText);
+            wrapper.appendChild(nameSpan);
+            wrapper.appendChild(statusDiv);
+
+            container.appendChild(wrapper);
+        }
+    } catch (err) {
+        console.error('Failed to fetch progress:', err);
+    }
+}
     setInterval(fetchProgress, 1000);
     fetchProgress();
+
 </script>
 {% endblock %}

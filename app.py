@@ -9,20 +9,13 @@ import threading
 import time
 import os
 import webbrowser
+import custom_logging
+import logging
 app = Flask(__name__)  # Flask constructor
 logging.getLogger('werkzeug').addHandler(logging.NullHandler()) # Suppress werkzeug logging
-logger = logging.getLogger(__name__) # Create a logger for this module
-logger.setLevel(logging.INFO) # Set the logger level to INFO
-# Create a file handler to log to a file
-logger_tmpfile = tempfile.NamedTemporaryFile(delete=False, delete_on_close=False)
-file_handler = logging.FileHandler(logger_tmpfile.name)
-file_handler.setLevel(logging.DEBUG) # Set the file handler level to INFO
-# Create a formatter and set it for the file handler
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-# Add the file handler to the logger
-logger.addHandler(file_handler)
-print("Application log file: {}".format(logger_tmpfile.name))
+logger = custom_logging.get_logger()
+
+print("Application log file: {}".format(custom_logging.get_log_path()))
 app.secret_key = 'supersecret'
 # globals
 mig = Migrator()
@@ -34,7 +27,7 @@ do_update_warning = False
 
 @app.context_processor
 def inject_logfile_name():
-    return dict(logfile_name=logger_tmpfile.name)
+    return dict(logfile_name=custom_logging.get_log_path())
 
 @app.route('/')
 def hello():
@@ -150,7 +143,9 @@ def migrate_bulk_progress_internal():
     if progress is None:
         return "No progress data available", 404
     # return progress as JSON
-    return json.dumps(progress), 200, {'Content-Type': 'application/json'}
+    retdata = json.dumps(progress)
+    logger.debug("Status route: sending progress data: {}".format(retdata))
+    return retdata, 200, {'Content-Type': 'application/json'}
 
 
 @app.route('/migrate/user/', methods=['GET', 'POST'])
@@ -223,7 +218,7 @@ def handle_internal_error(e):
 @app.route('/favicon.ico')
 def favicon():
     return send_from_directory(os.path.join(app.root_path, 'static'),
-                               'icon.png', mimetype='image/png')
+                               'favicon.ico', mimetype='image/vnd.microsoft.icon')
 
 def open_browser():
     time.sleep(1)  # Give the server time to start
@@ -245,10 +240,14 @@ if __name__ == '__main__':
         logger.warning("Unable to get latest software version!")
     else:
         if latest_ver.strip().lower() != VERSION.lower():
+            try:
+                cols = os.get_terminal_size().columns
+            except OSError:
+                cols = 100
             print("\n\n")
-            print("YOU ARE NOT RUNNING THE LATEST SOFTWARE VERSION".center(os.get_terminal_size().columns,'='))
-            print("Latest version: {} | Current version: {}".format(latest_ver, VERSION).center(os.get_terminal_size().columns,' '))
-            print("Download latest from https://github.com/Region1-IT-Projects/Shared-Drive-Migrator/releases/latest".center(os.get_terminal_size().columns,' '))
+            print("YOU ARE NOT RUNNING THE LATEST SOFTWARE VERSION".center(cols,'='))
+            print("Latest version: {} | Current version: {}".format(latest_ver, VERSION).center(cols,' '))
+            print("Download latest from https://github.com/Region1-IT-Projects/Shared-Drive-Migrator/releases/latest".center(cols,' '))
             print("\n\n")
             do_update_warning = True
     threading.Thread(target=open_browser).start()

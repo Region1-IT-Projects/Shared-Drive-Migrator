@@ -1,6 +1,5 @@
 import csv
 import ssl
-import time
 import uuid
 from json import JSONDecodeError
 from threading import Thread
@@ -9,11 +8,12 @@ import googleapiclient.discovery as g_discover
 import googleapiclient.errors as g_api_errors
 from google.oauth2 import service_account
 from google.auth.exceptions import RefreshError
-import logging
 import random
 import hashlib
-
-logger = logging.getLogger(__name__)
+import queue
+import time
+import custom_logging
+logger = custom_logging.get_logger()
 
 def g_api_wrapper(api_request, recursion_level=0):
     """Wrapper around Google API requests to handle common errors"""
@@ -50,12 +50,12 @@ def g_api_wrapper(api_request, recursion_level=0):
             return None
         return None
     except JSONDecodeError as e:
-        logging.error("Failed to decode JSON response from Google API: {}".format(e))
-        logging.info("Likley a temporary issue, retrying immediately...")
+        logger.error("Failed to decode JSON response from Google API: {}".format(e))
+        logger.info("Likley a temporary issue, retrying immediately...")
         if recursion_level < 10:
             return g_api_wrapper(api_request, recursion_level + 1)
         else:
-            logging.error("Giving up after {} retries.".format(recursion_level))
+            logger.error("Giving up after {} retries.".format(recursion_level))
         return None
     except ssl.SSLError as e:
         logger.warning(f"SSL error for request {api_request}: {e}")
@@ -435,6 +435,16 @@ class Migrator:
         u = User(src_acc, dst_acc)
         return u
 
+class ThreadStatus:
+    possible_statuses = ["Personal", "Shared", "Completed", "Failed"]
+    def __init__(self, user: str, status: str, progress=0.0):
+        self.user = user
+        self.status = status if status in self.possible_statuses else "Failed"
+        if self.status == "Shared":
+            self.progress = progress
+        else:
+            self.progress = None
+
 class BulkMigration:
     def __init__(self, csv_path:str, mig: Migrator):
         self.do_shared = False
@@ -442,10 +452,12 @@ class BulkMigration:
         self.skip_moved = False
         self.migrator = mig
         self.running = False
+        self.progress_queue = queue.Queue()
         # Read CSV file
         with open(csv_path, 'r') as csv_file:
             self.accounts = self.migrator.ingest_csv(csv_file)
         self.workers = {}
+        self.worker_statuses = {}
 
     def is_running(self):
         return self.running
@@ -469,12 +481,15 @@ class BulkMigration:
         user = self.migrator.create_user(src, dst)
         if user is None:
             logger.error(f"Failed to create user for {src} -> {dst}! Aborting...")
+            self.progress_queue.put(ThreadStatus(src, "Failed"))
             return
         if self.do_personal:
+            self.progress_queue.put(ThreadStatus(src, "Personal"))
             if not self.running:
                 return
+            start_time = time.time()
             user.migrate_personal_files(self.skip_moved)
-            logger.info("Finished migrating personal files for {}".format(user.src.address))
+            logger.info("Finished migrating personal files for {}. Took {}s".format(user.src.address, round(time.time() - start_time, 2)))
             if not self.running:
                 return
         if self.do_shared:
@@ -482,23 +497,30 @@ class BulkMigration:
             for idx, drive in enumerate(drives):
                 if not self.running:
                     return
+                self.progress_queue.put(ThreadStatus(src, "Shared", progress=idx / len(drives)))
                 target_id = user.prepare_team_drive_for_migrate(drive)
                 if target_id is None:
                     logger.warning(f"Drive {drive.name} already migrated or not initialized.")
                     continue
+                start_time = time.time()
                 user.migrate_drive(drive, self.skip_moved, target_id)
-                logger.info(f"Finished migrating drive {drive.name} for {user.src.address} ({idx}/{len(drives)})")
+                logger.info(f"Finished migrating drive {drive.name} for {user.src.address} ({idx}/{len(drives)}). Took {round(time.time() - start_time, 2)}s")
         logger.info(f"Migration for {user.src.address} completed.")
+        self.progress_queue.put(ThreadStatus(src, "Completed"))
 
     def stop(self):
         self.running = False
 
-    def get_progress(self):
+    def get_progress(self) -> list[dict] :
         """Get the progress of all worker threads"""
-        statuses = {}
-        for worker in self.workers:
-            if self.workers[worker].is_alive():
-                statuses[worker] = "In Progress"
-            else:
-                statuses[worker] = "Completed"
-        return statuses
+        while not self.progress_queue.empty():
+            msg: ThreadStatus = self.progress_queue.get()
+            self.worker_statuses[msg.user] = msg
+        for user, worker in self.workers.items():
+            if user not in self.worker_statuses:
+                logger.debug("Worker for {} not found in progress queue!".format(user))
+                continue
+            if self.worker_statuses[user].status not in ["Completed", "Failed"] and not worker.is_alive():
+                logger.warning("Worker for {} is not alive but not marked as completed!".format(user))
+                self.worker_statuses[user].status = "Failed"
+        return [v.__dict__ for v in self.worker_statuses.values()]
