@@ -1,6 +1,7 @@
 import csv
 import ssl
 import uuid
+from asyncio import Timeout
 from json import JSONDecodeError
 from threading import Thread
 from typing import TextIO
@@ -14,6 +15,7 @@ import queue
 import time
 import custom_logging
 logger = custom_logging.get_logger()
+MAX_EXP_BACKOFF_RETRIES = 50  # Maximum number of retries for exponential backoff
 
 def g_api_wrapper(api_request, recursion_level=0):
     """Wrapper around Google API requests to handle common errors"""
@@ -24,7 +26,7 @@ def g_api_wrapper(api_request, recursion_level=0):
         if e.resp.status in [403, 429]:
             error_reason = e.error_details[0] if e.error_details else None
             if error_reason in ['rateLimitExceeded', 'userRateLimitExceeded', 'quotaExceeded']:
-                if recursion_level < 10:
+                if recursion_level < MAX_EXP_BACKOFF_RETRIES:
                     # Wait and retry
                     delay = 2 ** recursion_level + random.uniform(0, 1)  # Exponential backoff with jitter
                     logger.warning("Rate limit exceeded, retrying after a {} seconds delay...".format(round(delay, 2)))
@@ -34,9 +36,12 @@ def g_api_wrapper(api_request, recursion_level=0):
                     logger.error(f"Rate limit exceeded for {api_request}. Giving up after {recursion_level} retries.")
                     return None
         elif e.resp.status in [400, 401]:
+            if e.reason == 'abusiveContentRestriction':
+                logger.warning("Cannot perform action {}: Google flagged file as Abusive Content.".format(api_request))
+                return None
             logger.error("Bad request or unauthorized access. This is a bug, please report it!! Bailing out. Error: {}".format(e))
         elif e.resp.status in [500, 502, 503, 504]:
-            logger.warning("Google API server error. This is likely a temporary issue. Retrying...")
+            logger.warning("Google API server error: {}\t This is likely a temporary issue. Retrying...".format(e))
             if recursion_level < 10:
                 delay = 2 ** recursion_level + random.uniform(0, 1)  # Exponential backoff with jitter
                 time.sleep(delay)
@@ -60,7 +65,7 @@ def g_api_wrapper(api_request, recursion_level=0):
     except ssl.SSLError as e:
         logger.warning(f"SSL error for request {api_request}: {e}")
         # do exponential backoff
-        if recursion_level < 10:
+        if recursion_level < MAX_EXP_BACKOFF_RETRIES:
             delay = 2 ** recursion_level + random.uniform(0, 1)
             logger.info(f"Retrying after {delay} seconds...")
             time.sleep(delay)
@@ -68,6 +73,17 @@ def g_api_wrapper(api_request, recursion_level=0):
         else:
             logger.error(f"Giving up after {recursion_level} retries due to SSL error.")
             logger.info("Please check your network connection or Google Workspace status page for ongoing issues. This is not an issue with the migrator itself.")
+            return None
+    except TimeoutError as e:
+        logger.error(f"Timeout error for request {api_request}: {e}. This may be due to a slow or unresponsive Google API server.")
+        # do exponential backoff
+        if recursion_level < MAX_EXP_BACKOFF_RETRIES:
+            delay = 2 ** recursion_level + random.uniform(0, 1)
+            logger.info(f"Retrying after {delay} seconds...")
+            time.sleep(delay)
+            return g_api_wrapper(api_request, recursion_level + 1)
+        else:
+            logger.error(f"Giving up after {recursion_level} retries due to SSL timeout error. This is likely a temporary issue with the Google API server.")
             return None
 
 class GFile:
@@ -132,10 +148,14 @@ class Org:
         return ret['id']
 
     def add_access(self, file_id: str, email: str, role: str = "writer"):
-        return g_api_wrapper(
-            self.API.permissions().create(fileId=file_id, body={"emailAddress": email, "role": role, "type": "user"},
-                                         supportsAllDrives=True, sendNotificationEmail=False)
-        )['id']
+        try:
+            return g_api_wrapper(
+                self.API.permissions().create(fileId=file_id, body={"emailAddress": email, "role": role, "type": "user"},
+                                             supportsAllDrives=True, sendNotificationEmail=False)
+            )['id']
+        except IndexError:
+            logger.info("Skipping adding access to {} for {}".format(file_id, email))
+            return None
 
     def remove_access(self, file_id: str, access_id: str):
         g_api_wrapper(self.API.permissions().delete(fileId=file_id, permissionId=access_id, supportsAllDrives=True))
@@ -143,7 +163,11 @@ class Org:
     def get_drives(self):
         tmp = g_api_wrapper(
             self.API.drives().list(fields="drives(id, name, hidden, restrictions)")
-        )['drives']
+        )
+        if tmp is None:
+            logger.error("Failed to fetch drives for {}. Skipping...".format(self.address))
+            return []
+        tmp = tmp['drives']
         out = []
         for i in tmp:
             drive = GDrive(i)
@@ -215,6 +239,9 @@ class User:
             org.API.permissions().list(fileId=file_id, supportsAllDrives=True, pageToken=token,
                                        fields="nextPageToken, permissions(id, role, emailAddress)")
         )
+        if response is None:
+            logger.error("Failed to fetch permissions for file {}. Skipping...".format(file_id))
+            return []
         permission_list = response['permissions']
         if 'nextPageToken' in response.keys():
             permission_list += self.permission_lookup(file_id, org, response['nextPageToken'])
@@ -249,6 +276,9 @@ class User:
             target_id = self.dst.new_team_drive(source_drive)
         # temporarily add source user account to dest drive as an organizer
         temp_access = self.dst.add_access(target_id, self.src.address)
+        if temp_access is None:
+            logger.error("Failed to add access to target drive {} for source user {}. Aborting migration.".format(target_id, self.src.address))
+            return False
         known_paths = set()
         known_paths.add(source_drive.id)
         # mappings of filepath IDs from old to new drive
@@ -271,10 +301,13 @@ class User:
                         continue
                     if file.mimeType == 'application/vnd.google-apps.folder':
                         # 'file' is actually a folder and cannot be copied, make a folder with same name instead
-                        new_id = g_api_wrapper(
+                        id_request = g_api_wrapper(
                             self.dst.API.files().create(body=file_metadata, supportsAllDrives=True, fields='id')
-                        )['id']
-
+                        )
+                        if id_request is None:
+                            logger.warning("Failed to create folder {} in target drive {}. Aborting migration.".format(file.name, target_id))
+                            return False
+                        new_id = id_request['id']
                         known_paths.add(file.id)
                         path_map.update({file.id: new_id})
                     else:
@@ -304,6 +337,8 @@ class User:
             if file.trashed or (file.moved and skip_migrated):
                 continue
             access_id = self.src.add_access(file.id, self.dst.address)
+            if access_id is None:
+                continue
             file_share_lookup[file.id] = access_id
         return file_share_lookup
 
@@ -312,20 +347,22 @@ class User:
         if len(files_and_shares) == 0:
             logger.warning("No personal files to migrate for {}!".format(self.src.address))
             return
-        # get base path of source and target users' drives
+
         try:
+            # get base path of source and target users' drives
             src_root = g_api_wrapper(self.src.API.files().get(fileId="root", fields="id"))['id']
             dst_root = g_api_wrapper(self.dst.API.files().get(fileId="root", fields="id"))['id']
+            # create folder in target drive to store copied files
+            folder_metadata = {
+                "name": "Migrated Personal Files",
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [dst_root]
+            }
+            dst_folder_id = g_api_wrapper(self.dst.API.files().create(body=folder_metadata))['id']
         except ValueError:
             logger.error("Cannot get root folder ID for account {}. Is it initialized?".format(self.src.address))
             return
-        # create folder in target drive to store copied files
-        folder_metadata = {
-            "name": "Migrated Personal Files",
-            "mimeType": "application/vnd.google-apps.folder",
-            "parents": [dst_root]
-        }
-        dst_folder_id = g_api_wrapper(self.dst.API.files().create(body=folder_metadata))['id']
+
         migrated_files = set()
         known_paths = {src_root: dst_folder_id}
         # make a copy of the shared files in target user's drive
@@ -335,7 +372,9 @@ class User:
                     continue
                 # get file metadata
                 file_metadata = g_api_wrapper(self.src.API.files().get(fileId=file_id, fields="id, name, mimeType, parents"))
-
+                if file_metadata is None:
+                    logger.warning("Failed to fetch metadata for file {}. Skipping...".format(file_id))
+                    continue
                 new_metadata = {
                     "name": file_metadata['name'],
                     "mimeType": file_metadata['mimeType'],
@@ -348,7 +387,11 @@ class User:
                     continue
                 # check if file is a folder
                 if file_metadata['mimeType'] == 'application/vnd.google-apps.folder':
-                    new_folder_id = g_api_wrapper(self.dst.API.files().create(body=new_metadata))['id']
+                    try:
+                        new_folder_id = g_api_wrapper(self.dst.API.files().create(body=new_metadata))['id']
+                    except ValueError:
+                        logger.error("Failed to create folder {} in target drive. Aborting...".format(file_metadata['name']))
+                        return
                     known_paths[file_metadata['id']] = new_folder_id
                 else:
                     # copy file to target drive
@@ -362,6 +405,26 @@ class User:
             self.src.remove_access(file_id, files_and_shares[file_id])
 
 
+def ingest_csv(data: TextIO) -> dict[str, str]:
+    accounts = {}
+    reader = csv.reader(data)
+    for index, row in enumerate(reader):
+        if len(row) != 2:
+            raise ValueError("Row {} invalid: {}cols != 2".format(index, len(row)))
+        temp_row = []
+        for addr_idx, addr in enumerate(row):
+            if check_email_validity(addr):
+                temp_row.append(addr.strip().casefold())
+            else:
+                if index == 0:
+                    # assume this is a header row
+                    continue
+                raise ValueError("{} is not a valid email address!".format(addr))
+        if len(temp_row) == 2:
+            accounts[temp_row[0]] = temp_row[1]
+    return accounts
+
+
 class Migrator:
     src_creds = None
     src_creds_hash = None
@@ -373,24 +436,6 @@ class Migrator:
         pass
 
     # return: string if error, list of string pairs (src, dst) if success
-    def ingest_csv(self, data: TextIO) -> str | dict[str, str]:
-        accounts = {}
-        reader = csv.reader(data)
-        for index, row in enumerate(reader):
-            if len(row) != 2:
-                return "Row {} invalid: {}cols != 2".format(index, len(row))
-            temp_row = []
-            for addr_idx, addr in enumerate(row):
-                if check_email_validity(addr):
-                    temp_row.append(addr.strip().casefold())
-                else:
-                    if index == 0:
-                        # assume this is a header row
-                        continue
-                    return "{} is not a valid email address!".format(addr)
-            if len(temp_row) == 2:
-                accounts[temp_row[0]] = temp_row[1]
-        return accounts
 
     def set_src_creds(self, credpath: str) -> bool:
         try:
@@ -455,7 +500,7 @@ class BulkMigration:
         self.progress_queue = queue.Queue()
         # Read CSV file
         with open(csv_path, 'r') as csv_file:
-            self.accounts = self.migrator.ingest_csv(csv_file)
+            self.accounts = ingest_csv(csv_file)
         self.workers = {}
         self.worker_statuses = {}
 

@@ -1,4 +1,4 @@
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 import json
 import requests
 from flask import Flask, render_template, flash, request, redirect, url_for, send_from_directory

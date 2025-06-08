@@ -9,7 +9,7 @@ log_file.close()  # Close so logger can write to it
 
 # Configure logging
 logger = logging.getLogger("shared_drive_migrator")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 # Avoid duplicate handlers if this file is imported multiple times
 if not logger.hasHandlers():

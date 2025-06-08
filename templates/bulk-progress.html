@@ -96,7 +96,13 @@
             }
 
             const statusText = document.createElement('p');
-            statusText.className = 'text-sm text-gray-400 ml-2';
+            if (status === "Failed") {
+                statusText.className = 'text-sm text-red-500 ml-2';
+            } else if (status === "Personal") {
+                statusText.className = 'text-sm text-blue-400 ml-2';
+            } else {
+                statusText.className = 'text-sm text-gray-400 ml-2';
+            }
             statusText.textContent = progress !== null
                 ? `${status} (${progress.toFixed(1)}%)`
                 : status;
