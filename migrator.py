@@ -1,9 +1,10 @@
 import csv
 import ssl
+import threading
 import uuid
 from asyncio import Timeout
 from json import JSONDecodeError
-from threading import Thread
+from threading import Thread, Lock
 from typing import TextIO
 import googleapiclient.discovery as g_discover
 import googleapiclient.errors as g_api_errors
@@ -14,11 +15,54 @@ import hashlib
 import queue
 import time
 import custom_logging
+import traceback
 logger = custom_logging.get_logger()
 MAX_EXP_BACKOFF_RETRIES = 50  # Maximum number of retries for exponential backoff
 
+class FunFacts:
+    def __init__(self, backoff, api_errs):
+        self.exp_backoff_total_time = 0.0
+        self.num_google_errors = 0  # Counter for Google API errors
+        self.failed_files = set()  # Set to keep track of files that failed to process
+        self.lock = threading.Lock()
+
+    def add_error(self, file_id: str):
+        """Add a file ID to the set of failed files"""
+        with self.lock:
+            self.failed_files.add(file_id)
+
+    def add_backoff_time(self, secs: float):
+        """Add time to the total exponential backoff time"""
+        with self.lock:
+            self.exp_backoff_total_time += secs
+        if round(self.exp_backoff_total_time) % 10 == 0:
+            logger.info("Total time spent on exponential backoff: {} seconds".format(round(self.exp_backoff_total_time, 2)))
+
+    def increment_google_errors(self):
+        """Increment the number of Google API errors"""
+        with self.lock:
+            self.num_google_errors += 1
+
+    def as_dict(self) -> dict:
+        """Return a dict representation of the FunFacts object"""
+        return {
+            "exp_backoff_total_time": self.exp_backoff_total_time,
+            "num_google_errors": self.num_google_errors,
+            "failed_files": list(self.failed_files)
+        }
+
+global_funfacts = FunFacts(0, 0)
+
+def exponential_backoff(recursion_level: int):
+    delay = 2 ** recursion_level + random.uniform(0, 1)  # Exponential backoff with jitter
+    logger.info("Retrying after a {} seconds delay...".format(round(delay, 2)))
+    global_funfacts.add_backoff_time(delay)
+    time.sleep(delay)
+
 def g_api_wrapper(api_request, recursion_level=0):
     """Wrapper around Google API requests to handle common errors"""
+    if recursion_level != 0:
+        logger.debug("On recursion level {}, retrying request: {}".format(recursion_level, api_request))
     try:
         return api_request.execute()
     except g_api_errors.HttpError as e:
@@ -27,20 +71,19 @@ def g_api_wrapper(api_request, recursion_level=0):
             error_reason = e.error_details[0] if e.error_details else None
             if error_reason in ['rateLimitExceeded', 'userRateLimitExceeded', 'quotaExceeded']:
                 if recursion_level < MAX_EXP_BACKOFF_RETRIES:
+                    logger.warning(f"Google API is limiting us due to {error_reason}.")
                     # Wait and retry
-                    delay = 2 ** recursion_level + random.uniform(0, 1)  # Exponential backoff with jitter
-                    logger.warning("Rate limit exceeded, retrying after a {} seconds delay...".format(round(delay, 2)))
-                    time.sleep(delay)
+                    exponential_backoff(recursion_level)
                     return g_api_wrapper(api_request, recursion_level + 1)
                 else:
                     logger.error(f"Rate limit exceeded for {api_request}. Giving up after {recursion_level} retries.")
-                    return None
         elif e.resp.status in [400, 401]:
             if e.reason == 'abusiveContentRestriction':
                 logger.warning("Cannot perform action {}: Google flagged file as Abusive Content.".format(api_request))
-                return None
-            logger.error("Bad request or unauthorized access. This is a bug, please report it!! Bailing out. Error: {}".format(e))
+            else:
+                logger.error("Bad request or unauthorized access. This is a bug, please report it!! Bailing out. Error: {}".format(e))
         elif e.resp.status in [500, 502, 503, 504]:
+            global_funfacts.increment_google_errors()
             logger.warning("Google API server error: {}\t This is likely a temporary issue. Retrying...".format(e))
             if recursion_level < 10:
                 delay = 2 ** recursion_level + random.uniform(0, 1)  # Exponential backoff with jitter
@@ -49,11 +92,11 @@ def g_api_wrapper(api_request, recursion_level=0):
             else:
                 logger.error(f"Google API server error for {api_request}. Giving up after {recursion_level} retries.")
                 logger.info("Please try again later or check the Google Workspace status page for ongoing issues.")
-                return None
+        elif e.resp.status in [404, 410]:
+            logger.warning(f"Resource not found for request {api_request}: {e} Skipping...")
+            # This is not a critical error, just means the resource does not exist
         else:
             logger.error(f"Unhandled HTTP error for request {api_request}: {e}")
-            return None
-        return None
     except JSONDecodeError as e:
         logger.error("Failed to decode JSON response from Google API: {}".format(e))
         logger.info("Likley a temporary issue, retrying immediately...")
@@ -61,7 +104,6 @@ def g_api_wrapper(api_request, recursion_level=0):
             return g_api_wrapper(api_request, recursion_level + 1)
         else:
             logger.error("Giving up after {} retries.".format(recursion_level))
-        return None
     except ssl.SSLError as e:
         logger.warning(f"SSL error for request {api_request}: {e}")
         # do exponential backoff
@@ -73,9 +115,8 @@ def g_api_wrapper(api_request, recursion_level=0):
         else:
             logger.error(f"Giving up after {recursion_level} retries due to SSL error.")
             logger.info("Please check your network connection or Google Workspace status page for ongoing issues. This is not an issue with the migrator itself.")
-            return None
     except TimeoutError as e:
-        logger.error(f"Timeout error for request {api_request}: {e}. This may be due to a slow or unresponsive Google API server.")
+        logger.warning(f"Timeout error for request {api_request}: {e}. This may be due to a slow or unresponsive Google API server.")
         # do exponential backoff
         if recursion_level < MAX_EXP_BACKOFF_RETRIES:
             delay = 2 ** recursion_level + random.uniform(0, 1)
@@ -84,7 +125,8 @@ def g_api_wrapper(api_request, recursion_level=0):
             return g_api_wrapper(api_request, recursion_level + 1)
         else:
             logger.error(f"Giving up after {recursion_level} retries due to SSL timeout error. This is likely a temporary issue with the Google API server.")
-            return None
+    logger.debug("Fell through to the end of g_api_wrapper, returning None. Traceback follows: {}".format(traceback.format_exc()))
+    return None
 
 class GFile:
     moved = False
@@ -241,6 +283,7 @@ class User:
         )
         if response is None:
             logger.error("Failed to fetch permissions for file {}. Skipping...".format(file_id))
+            global_funfacts.add_error(file_id)
             return []
         permission_list = response['permissions']
         if 'nextPageToken' in response.keys():
@@ -338,6 +381,8 @@ class User:
                 continue
             access_id = self.src.add_access(file.id, self.dst.address)
             if access_id is None:
+                logger.warning("Failed to share file {} with {}. Skipping...".format(file.id, self.dst.address))
+                global_funfacts.add_error(file.id)
                 continue
             file_share_lookup[file.id] = access_id
         return file_share_lookup
@@ -365,8 +410,18 @@ class User:
 
         migrated_files = set()
         known_paths = {src_root: dst_folder_id}
+        last_migrated_count = 0
+        no_migrated_count = 0
         # make a copy of the shared files in target user's drive
         while len(migrated_files) < len(files_and_shares):
+            if len(migrated_files) == last_migrated_count:
+                no_migrated_count += 1
+                if no_migrated_count > 10:
+                    logger.error("No new files migrated in the last 10 iterations. Stopping migration. Total files: {}, Migrated files: {}".format(len(files_and_shares), len(migrated_files)))
+                    break
+            else:
+                no_migrated_count = 0
+            last_migrated_count = len(migrated_files)
             for file_id in files_and_shares:
                 if file_id in migrated_files:
                     continue
@@ -374,6 +429,8 @@ class User:
                 file_metadata = g_api_wrapper(self.src.API.files().get(fileId=file_id, fields="id, name, mimeType, parents"))
                 if file_metadata is None:
                     logger.warning("Failed to fetch metadata for file {}. Skipping...".format(file_id))
+                    global_funfacts.add_error(file_id)
+                    migrated_files.add(file_id) # to avoid infinite loop
                     continue
                 new_metadata = {
                     "name": file_metadata['name'],
@@ -383,7 +440,7 @@ class User:
                 try:
                     new_metadata['parents'] = [known_paths[file_metadata['parents'][0]]]
                 except KeyError:
-                    # parent is not known, pass
+                    # parent is not yet known, pass
                     continue
                 # check if file is a folder
                 if file_metadata['mimeType'] == 'application/vnd.google-apps.folder':
@@ -550,7 +607,7 @@ class BulkMigration:
                 start_time = time.time()
                 user.migrate_drive(drive, self.skip_moved, target_id)
                 logger.info(f"Finished migrating drive {drive.name} for {user.src.address} ({idx}/{len(drives)}). Took {round(time.time() - start_time, 2)}s")
-        logger.info(f"Migration for {user.src.address} completed.")
+        logger.info(f"Migration for {user.src.address} completed. Transferred {len(user.drives)} drives and {len(user.src.personal_files)} personal files.")
         self.progress_queue.put(ThreadStatus(src, "Completed"))
 
     def stop(self):

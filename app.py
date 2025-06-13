@@ -1,4 +1,4 @@
-VERSION = "2.2.1"
+VERSION = "2.3.1"
 import json
 import requests
 from flask import Flask, render_template, flash, request, redirect, url_for, send_from_directory
@@ -14,7 +14,6 @@ import logging
 app = Flask(__name__)  # Flask constructor
 logging.getLogger('werkzeug').addHandler(logging.NullHandler()) # Suppress werkzeug logging
 logger = custom_logging.get_logger()
-
 print("Application log file: {}".format(custom_logging.get_log_path()))
 app.secret_key = 'supersecret'
 # globals
@@ -37,6 +36,10 @@ def hello():
         do_update_warning = False
     return render_template("index.html")
 
+
+@app.route("/stats", methods=['GET'])
+def return_stats():
+    return json.dumps(global_funfacts.as_dict()), 200, {'Content-Type': 'application/json'}
 
 @app.route('/setup/<stage>/', methods=['POST', 'GET'])
 def setup(stage: str):
