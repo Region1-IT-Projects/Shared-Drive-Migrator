@@ -1,10 +1,12 @@
 import csv
+import io
+import shutil
 import ssl
+import tempfile
 import threading
 import uuid
-from asyncio import Timeout
 from json import JSONDecodeError
-from threading import Thread, Lock
+from threading import Thread
 from typing import TextIO
 import googleapiclient.discovery as g_discover
 import googleapiclient.errors as g_api_errors
@@ -14,15 +16,22 @@ import random
 import hashlib
 import queue
 import time
-import custom_logging
 import traceback
-logger = custom_logging.get_logger()
+import logging
+import os
+import re
+from tqdm import tqdm
+
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+
 MAX_EXP_BACKOFF_RETRIES = 50  # Maximum number of retries for exponential backoff
+logger = logging.getLogger("shared_drive_migrator")
+logging.basicConfig(level=logging.DEBUG)
 
 class FunFacts:
     def __init__(self, backoff, api_errs):
-        self.exp_backoff_total_time = 0.0
-        self.num_google_errors = 0  # Counter for Google API errors
+        self.exp_backoff_total_time = backoff
+        self.num_google_errors = api_errs  # Counter for Google API errors
         self.failed_files = set()  # Set to keep track of files that failed to process
         self.lock = threading.Lock()
 
@@ -128,6 +137,18 @@ def g_api_wrapper(api_request, recursion_level=0):
     logger.debug("Fell through to the end of g_api_wrapper, returning None. Traceback follows: {}".format(traceback.format_exc()))
     return None
 
+def _sanitize_filename(name: str, max_len: int = 150) -> str:
+    """Sanitize filenames for safe local storage"""
+    # Remove invalid characters for most filesystems
+    name = re.sub(r'[<>:"/\\|?*]', "_", name)
+    # Collapse whitespace
+    name = re.sub(r"\s+", " ", name).strip()
+    # Truncate overly long filenames
+    if len(name) > max_len:
+        base, ext = os.path.splitext(name)
+        name = base[:max_len - len(ext)] + ext
+    return name
+
 class GFile:
     moved = False
     trashed = False
@@ -196,11 +217,13 @@ class Org:
                                              supportsAllDrives=True, sendNotificationEmail=False)
             )['id']
         except IndexError:
-            logger.info("Skipping adding access to {} for {}".format(file_id, email))
+            logger.warning("Skipping adding access to {} for {}".format(file_id, email))
             return None
 
     def remove_access(self, file_id: str, access_id: str):
-        g_api_wrapper(self.API.permissions().delete(fileId=file_id, permissionId=access_id, supportsAllDrives=True))
+        resp = g_api_wrapper(self.API.permissions().delete(fileId=file_id, permissionId=access_id, supportsAllDrives=True))
+        if resp is None:
+            logger.error("MANUAL INTERVENTION REQUIRED: Failed to unshare file {} from user {}!".format(file_id, self.address))
 
     def get_drives(self):
         tmp = g_api_wrapper(
@@ -213,6 +236,7 @@ class Org:
         out = []
         for i in tmp:
             drive = GDrive(i)
+            logger.debug("Found drive: {} ({}migrated) under user {}".format(drive.name, self.address, "not " if not drive.migrated else ""))
             out.append(drive)
             self.known_drives[drive.id] = drive
         return out
@@ -237,6 +261,7 @@ class Org:
 
     def populate_drive_files(self, drive: GDrive):
         file_list = self.__fetch_files(driveId=drive.id, supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="drive")
+        logger.debug("Fetched {} files from drive {}".format(len(file_list), drive.name))
         drive.set_files(file_list)
 
     def get_personal_files(self):
@@ -247,6 +272,7 @@ class Org:
             f = GFile(i)
             if f.is_mine and not f.trashed and f.mimeType != 'application/vnd.google-apps.shortcut':
                 self.personal_files.append(f)
+        logger.debug("Fetched {} personal files for user {}".format(len(self.personal_files), self.address))
         return self.personal_files
 
     def mark_drive_moved(self, drive: GDrive):
@@ -293,11 +319,21 @@ class User:
     def get_owned_team_drives(self) -> list[GDrive]:
         all_drives = self.src.get_drives()
         for drive in all_drives:
+            am_organizer = False
             # make sure we have organizer permission
             for perm in self.permission_lookup(drive.id):
                 if perm['emailAddress'] == self.src.address:
                     if perm['role'] == 'organizer':
                         self.drives.append(drive)
+                        am_organizer = True
+                    else:
+                        logger.debug(
+                            "Skipping drive {} for user {}: not an organizer (role: {})".format(
+                                drive.name, self.src.address, perm["role"]
+                            )
+                        )
+                elif perm['role'] == 'organizer' and am_organizer:
+                    logger.warning("Drive {} has multiple organizers, please ensure only one user migrates it!".format(drive.name))
         return self.drives
 
     def prepare_team_drive_for_migrate(self, drive: GDrive) -> str | None:
@@ -322,6 +358,7 @@ class User:
         if temp_access is None:
             logger.error("Failed to add access to target drive {} for source user {}. Aborting migration.".format(target_id, self.src.address))
             return False
+        logger.debug("Added temporary access to target drive {} for source user {}".format(target_id, self.src.address))
         known_paths = set()
         known_paths.add(source_drive.id)
         # mappings of filepath IDs from old to new drive
@@ -378,12 +415,14 @@ class User:
         # share every file in personal drive to target user
         for file in self.src.personal_files:
             if file.trashed or (file.moved and skip_migrated):
+                logger.debug("Skipping file {} (moved: {}, trashed: {})".format(file.id, file.moved, file.trashed))
                 continue
             access_id = self.src.add_access(file.id, self.dst.address)
             if access_id is None:
                 logger.warning("Failed to share file {} with {}. Skipping...".format(file.id, self.dst.address))
                 global_funfacts.add_error(file.id)
                 continue
+            logger.debug("Shared file {} with {}. Access ID: {}".format(file.id, self.dst.address, access_id))
             file_share_lookup[file.id] = access_id
         return file_share_lookup
 
@@ -409,28 +448,29 @@ class User:
             return
 
         migrated_files = set()
+        failed_files = set()
         known_paths = {src_root: dst_folder_id}
         last_migrated_count = 0
         no_migrated_count = 0
         # make a copy of the shared files in target user's drive
-        while len(migrated_files) < len(files_and_shares):
-            if len(migrated_files) == last_migrated_count:
+        while (len(migrated_files) + len(failed_files)) < len(files_and_shares):
+            if len(migrated_files) + len(failed_files) == last_migrated_count:
                 no_migrated_count += 1
-                if no_migrated_count > 10:
+                if no_migrated_count > 4:
                     logger.error("No new files migrated in the last 10 iterations. Stopping migration. Total files: {}, Migrated files: {}".format(len(files_and_shares), len(migrated_files)))
                     break
             else:
                 no_migrated_count = 0
-            last_migrated_count = len(migrated_files)
+            last_migrated_count = len(migrated_files) + len(failed_files)
             for file_id in files_and_shares:
-                if file_id in migrated_files:
+                if file_id in migrated_files or file_id in failed_files:
                     continue
                 # get file metadata
                 file_metadata = g_api_wrapper(self.src.API.files().get(fileId=file_id, fields="id, name, mimeType, parents"))
                 if file_metadata is None:
                     logger.warning("Failed to fetch metadata for file {}. Skipping...".format(file_id))
                     global_funfacts.add_error(file_id)
-                    migrated_files.add(file_id) # to avoid infinite loop
+                    failed_files.add(file_id)
                     continue
                 new_metadata = {
                     "name": file_metadata['name'],
@@ -447,7 +487,9 @@ class User:
                     try:
                         new_folder_id = g_api_wrapper(self.dst.API.files().create(body=new_metadata))['id']
                     except ValueError:
-                        logger.error("Failed to create folder {} in target drive. Aborting...".format(file_metadata['name']))
+                        logger.error("Failed to create folder {} in target drive. Aborting migration...".format(file_metadata['name']))
+                        for existing in files_and_shares: #clean up already shared files before exit
+                            self.src.remove_access(existing, files_and_shares[existing])
                         return
                     known_paths[file_metadata['id']] = new_folder_id
                 else:
@@ -456,10 +498,109 @@ class User:
                 migrated_files.add(file_id)
                 # add a labeled to file indicating it has been copied
                 self.src.mark_file_moved(file_id, new_metadata['parents'][0])
-        logger.info("Copied {} files to target drive.".format(len(migrated_files)))
         # un-share all files in personal drive
         for file_id in files_and_shares:
             self.src.remove_access(file_id, files_and_shares[file_id])
+        logger.info("Copied {} files to target drive.".format(len(migrated_files)))
+
+    def download_personal_files(self, local_path: str, skip_migrated: bool = True):
+        """
+        Download all personal drive files to local_path for this user.
+        Exports Google-native files (Docs, Sheets, Slides) into editable formats.
+        """
+        if os.path.exists(local_path):
+            logger.warning("Local path {} already exists, collision may occur".format(local_path))
+        else:
+            os.makedirs(local_path)
+
+        if len(self.src.personal_files) == 0:
+            self.src.get_personal_files()
+        if len(self.src.personal_files) == 0:
+            logger.error(f"No personal files found for {self.src.address}")
+            return
+
+        for f in self.src.personal_files:
+            if f.trashed or (f.moved and skip_migrated):
+                logger.debug(f"Skipping {f.id} (moved={f.moved}, trashed={f.trashed})")
+                continue
+
+            # sanitize filename
+            safe_name = _sanitize_filename(f.name)
+
+            try:
+                if f.mimeType == 'application/vnd.google-apps.folder':
+                    logger.debug("skipping folder {}".format(f.name))
+                    continue  # skip folders, they cannot be downloaded
+                if f.mimeType.startswith("application/vnd.google-apps"):
+                    # Google Docs-type file → export to editable formats
+                    export_map = {
+                        "application/vnd.google-apps.document": (
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"),
+                        "application/vnd.google-apps.spreadsheet": (
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
+                        "application/vnd.google-apps.presentation": (
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"),
+                        "application/vnd.google-apps.drawing": ("image/svg+xml", ".svg"),
+                        # no true editable format
+                    }
+                    export_mime, ext = export_map.get(f.mimeType, (None, None))
+
+                    if export_mime:
+                        request = self.src.API.files().export(fileId=f.id, mimeType=export_mime)
+                        data = request.execute()
+                        with open(os.path.join(local_path, safe_name + ext), "wb") as out:
+                            out.write(data)
+                    else:
+                        logger.warning(f"Skipping unsupported Google-native file {f.name} ({f.mimeType})")
+                        continue
+                else:
+                    request = self.src.API.files().get_media(fileId=f.id)
+                    fh = io.FileIO(os.path.join(local_path, safe_name), 'wb')
+                    downloader = MediaIoBaseDownload(fh, request)
+                    done = False
+                    while not done:
+                        status, done = downloader.next_chunk()
+
+                logger.info(f"Downloaded {f.name}")
+
+            except Exception as e:
+                logger.error(f"Failed to download {f.name} ({f.id}): {e}")
+                global_funfacts.add_error(f.id)
+
+    def upload_personal_files(self, local_path: str):
+        """
+        Upload all files from local_path to personal drive for this user.
+        """
+        if not os.path.exists(local_path):
+            logger.error(f"Local path {local_path} does not exist")
+            return
+
+        # get root folder ID
+        dst_root = g_api_wrapper(self.dst.API.files().get(fileId="root", fields="id"))['id']
+        # create folder in target drive to store copied files
+        folder_metadata = {
+            "name": "Migrated Personal Files",
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [dst_root]
+        }
+        dst_folder_id = g_api_wrapper(self.dst.API.files().create(body=folder_metadata))['id']
+        logger.info("beginning upload of files from local dir {} to user {}".format(local_path, self.dst.address))
+        for entry in tqdm(os.scandir(local_path)):
+            if entry.is_file():
+                file_metadata = {
+                    "name": entry.name,
+                    "parents": [dst_folder_id]  # upload into the folder
+                }
+                media = MediaFileUpload(entry.path, resumable=True)
+
+                uploaded_file = g_api_wrapper(
+                    self.dst.API.files().create(
+                        body=file_metadata,
+                        media_body=media,
+                        fields="id"
+                    )
+                )
+                logger.debug(f"Uploaded {entry.name} with ID {uploaded_file['id']}")
 
 
 def ingest_csv(data: TextIO) -> dict[str, str]:
@@ -590,7 +731,12 @@ class BulkMigration:
             if not self.running:
                 return
             start_time = time.time()
-            user.migrate_personal_files(self.skip_moved)
+            #user.migrate_personal_files(self.skip_moved)
+            user_tmp_dir = os.path.join(tempfile.gettempdir(), f"migrator_{src.replace('@','_at_')}")
+            user.download_personal_files(user_tmp_dir, self.skip_moved)
+            user.upload_personal_files(user_tmp_dir)
+            logger.debug("deleting local tmp dir {}".format(user_tmp_dir))
+            shutil.rmtree(user_tmp_dir, ignore_errors=True)
             logger.info("Finished migrating personal files for {}. Took {}s".format(user.src.address, round(time.time() - start_time, 2)))
             if not self.running:
                 return

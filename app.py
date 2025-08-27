@@ -1,32 +1,36 @@
-VERSION = "2.3.1"
 import json
+import pdb
+import shutil
+
 import requests
 from flask import Flask, render_template, flash, request, redirect, url_for, send_from_directory
-from migrator import *
+import migrator
 import tempfile
 import traceback
 import threading
 import time
 import os
 import webbrowser
-import custom_logging
 import logging
+VERSION = "2.4.0"
 app = Flask(__name__)  # Flask constructor
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG)
 logging.getLogger('werkzeug').addHandler(logging.NullHandler()) # Suppress werkzeug logging
-logger = custom_logging.get_logger()
-print("Application log file: {}".format(custom_logging.get_log_path()))
+
+# print("Application log file: {}".format(custom_logging.get_log_path()))
 app.secret_key = 'supersecret'
 # globals
-mig = Migrator()
+mig = migrator.Migrator()
 tempfiles = []
-bulkMigration: BulkMigration | None = None
+bulkMigration: migrator.BulkMigration | None = None
 
-cur_user: User | None = None
+cur_user: migrator.User | None = None
 do_update_warning = False
 
 @app.context_processor
 def inject_logfile_name():
-    return dict(logfile_name=custom_logging.get_log_path())
+    return dict(logfile_name="")
 
 @app.route('/')
 def hello():
@@ -39,7 +43,7 @@ def hello():
 
 @app.route("/stats", methods=['GET'])
 def return_stats():
-    return json.dumps(global_funfacts.as_dict()), 200, {'Content-Type': 'application/json'}
+    return json.dumps(migrator.global_funfacts.as_dict()), 200, {'Content-Type': 'application/json'}
 
 @app.route('/setup/<stage>/', methods=['POST', 'GET'])
 def setup(stage: str):
@@ -87,28 +91,28 @@ def migrate_bulk():
             tmp = tempfile.NamedTemporaryFile(delete=False)
             request.files['file'].save(tmp.name)
             if bulkMigration is not None:
-                logger.error("Cannot start migration: Bulk migration already in progress!")
+                migrator.logger.error("Cannot start migration: Bulk migration already in progress!")
                 flash("Bulk migration already in progress!")
                 return "Error: Bulk migration already in progress!", 400
             try:
-                bulkMigration = BulkMigration(tmp.name, mig)
-            except Exception as e:
-                flash(f"Error processing CSV file: {str(e)}")
-                logger.error("Failed to process CSV file:", e)
+                bulkMigration = migrator.BulkMigration(tmp.name, mig)
+            except Exception as exc:
+                flash(f"Error processing CSV file: {str(exc)}")
+                migrator.logger.error("Failed to process CSV file:", exc)
                 bulkMigration = None
                 return redirect(url_for('migrate_bulk'))
         else:
-            logger.error("did not understand POSTed data: ",request)
+            migrator.logger.error("did not understand POSTed data: ", request)
             return "BAD REQUEST",400
     return render_template('migrate-bulk.html', nextpage="/migrate/bulk/progress/")
 
 @app.route('/migrate/bulk/start', methods=['POST'])
 def start_bulk_migrate():
-    if not isinstance(bulkMigration, BulkMigration):
-        logger.warning("Got command to start migration with no instance ready!!")
+    if not isinstance(bulkMigration, migrator.BulkMigration):
+        migrator.logger.warning("Got command to start migration with no instance ready!!")
         return "Bad Request: Missing Precondition", 412
     if bulkMigration.is_running():
-        logger.warning("Got command to start migration with already running!!")
+        migrator.logger.warning("Got command to start migration with already running!!")
         flash("A migration is already running!")
         return "Bad Request: Already running", 409
     cbdata = json.loads(request.form.get('checkboxData', '{}'))
@@ -116,14 +120,14 @@ def start_bulk_migrate():
     migrate_personal = cbdata.get('do_personal', 'false')
     migrate_shared = cbdata.get('do_shared', 'false')
     bulkMigration.start_migration(skip_moved, migrate_personal, migrate_shared)
-    logger.info("Got start command for bulk migration")
+    migrator.logger.info("Got start command for bulk migration")
     return "OK", 200
 
 @app.route('/migrate/bulk/abort', methods=['POST'])
 def abort_bulk_migrate():
     global bulkMigration
-    if not isinstance(bulkMigration, BulkMigration):
-        logger.warning("Got command to abort migration with no instance running!!")
+    if not isinstance(bulkMigration, migrator.BulkMigration):
+        migrator.logger.warning("Got command to abort migration with no instance running!!")
         return "Bad Request: Missing Precondition", 412
     bulkMigration.stop()
     bulkMigration = None
@@ -132,7 +136,7 @@ def abort_bulk_migrate():
 
 @app.route('/migrate/bulk/progress/', methods=['GET'])
 def migrate_bulk_progress():
-    if not isinstance(bulkMigration, BulkMigration):
+    if not isinstance(bulkMigration, migrator.BulkMigration):
         flash("No bulk migration in progress! ({})".format(bulkMigration))
         return redirect(url_for('migrate_bulk'))
     else:
@@ -140,14 +144,14 @@ def migrate_bulk_progress():
 
 @app.route('/migrate/bulk/progress/internal', methods=['GET'])
 def migrate_bulk_progress_internal():
-    if not isinstance(bulkMigration, BulkMigration):
+    if not isinstance(bulkMigration, migrator.BulkMigration):
         return "No bulk migration in progress", 404
     progress = bulkMigration.get_progress()
     if progress is None:
         return "No progress data available", 404
     # return progress as JSON
     retdata = json.dumps(progress)
-    logger.debug("Status route: sending progress data: {}".format(retdata))
+    migrator.logger.debug("Status route: sending progress data: {}".format(retdata))
     return retdata, 200, {'Content-Type': 'application/json'}
 
 
@@ -169,15 +173,21 @@ def migrate_user():
 
 @app.route('/migrate/user/drives/', methods=['GET', 'POST'])
 def migrate_user_drives():
-    if not isinstance(cur_user, User):
+    if not isinstance(cur_user, migrator.User):
         flash("Please enter user information first.")
         return redirect(url_for('migrate_user'))
-    user: User = cur_user
+    user: migrator.User = cur_user
     if request.method == 'POST':
         if isinstance(request.json, dict):
             if request.json['personal']:
                 # threading.Thread(target=user.migrate_personal_files, args=([bool(request.json['skip_moved'])])).start()
-                user.migrate_personal_files(bool(request.json['skip_moved']))
+                #user.migrate_personal_files(bool(request.json['skip_moved']))
+                user_tmp_dir = os.path.join(tempfile.gettempdir(), f"migrator_{user.src.address.replace('@', '_at_')}")
+                user.download_personal_files(user_tmp_dir, bool(request.json['skip_moved']))
+                user.upload_personal_files(user_tmp_dir)
+                logger.debug("deleting local tmp dir {}".format(user_tmp_dir))
+                shutil.rmtree(user_tmp_dir, ignore_errors=True)
+
                 flash("Personal files migration finished, moving to team drives.")
             to_migrate = []
             for i in user.drives:
@@ -200,7 +210,7 @@ def migrate_user_drives():
 
 @app.route('/migrate/progress/<drive_id>/')
 def migrate_progress(drive_id):
-    if cur_user is User:
+    if cur_user is migrator.User:
         for drive in cur_user.drives:
             if drive.id == drive_id:
                 if len(drive.files) != 0 and not drive.migrator_thread.is_alive():
@@ -214,7 +224,8 @@ def migrate_success():
     return redirect(url_for('migrate_user'))
 
 @app.errorhandler(500)
-def handle_internal_error(e):
+def handle_internal_error(er):
+    logger.error("Internal server error: {}".format(er))
     trace = traceback.format_exc()
     return render_template('show-err.html', err=trace[trace.rindex("File "):]), 500
 
@@ -225,7 +236,7 @@ def favicon():
 
 def open_browser():
     time.sleep(1)  # Give the server time to start
-    logger.info("Opening browser to http://127.0.0.1:5000/")
+    migrator.logger.info("Opening browser to http://127.0.0.1:5000/")
     webbrowser.open_new("http://127.0.0.1:5000/")
 
 def get_latest_release_tag(repo):
@@ -234,32 +245,53 @@ def get_latest_release_tag(repo):
     response.raise_for_status()
     return response.json()["tag_name"]
 
-
-if __name__ == '__main__':
-
+def version_check():
+    global do_update_warning
     try:
         latest_ver = get_latest_release_tag("Region1-IT-Projects/Shared-Drive-Migrator")
     except requests.exceptions.HTTPError:
         logger.warning("Unable to get latest software version!")
-    else:
-        if latest_ver.strip().lower() != VERSION.lower():
-            try:
-                cols = os.get_terminal_size().columns
-            except OSError:
-                cols = 100
-            print("\n\n")
-            print("YOU ARE NOT RUNNING THE LATEST SOFTWARE VERSION".center(cols,'='))
-            print("Latest version: {} | Current version: {}".format(latest_ver, VERSION).center(cols,' '))
-            print("Download latest from https://github.com/Region1-IT-Projects/Shared-Drive-Migrator/releases/latest".center(cols,' '))
-            print("\n\n")
-            do_update_warning = True
+        return
+    lv_arr = latest_ver.split('.')
+    cur_ver_arr = VERSION.split('.')
+    if len(lv_arr) != len(cur_ver_arr):
+        logger.warning("Version format mismatch: latest version {} does not match current version {}".format(latest_ver, VERSION))
+        return
+    for i in range(len(lv_arr)):
+        try:
+            l = int(lv_arr[i])
+            c = int(cur_ver_arr[i])
+            if l > c:
+                do_update_warning = True
+                break
+            elif l < c:
+                logger.info("You are running a newer version than the latest release: {} > {}".format(VERSION, latest_ver))
+                return
+            # else continue loop
+        except ValueError:
+            logger.warning("Invalid version format: latest version {} does not match current version {}".format(latest_ver, VERSION))
+            return
+    if do_update_warning:
+        try:
+            cols = os.get_terminal_size().columns
+        except OSError:
+            cols = 100
+        print("\n\n")
+        print("YOU ARE NOT RUNNING THE LATEST SOFTWARE VERSION".center(cols,'='))
+        print("Latest version: {} | Current version: {}".format(latest_ver, VERSION).center(cols,' '))
+        print("Download latest from https://github.com/Region1-IT-Projects/Shared-Drive-Migrator/releases/latest".center(cols,' '))
+        print("\n\n")
+
+
+if __name__ == '__main__':
+    version_check()
     threading.Thread(target=open_browser).start()
     try:
         app.run(host="127.0.0.1", port=5000, debug=False)
-    except KeyboardInterrupt:
-        logger.info("Server stopped by user.")
-        print("Application log file: {}".format(logger_tmpfile.name))
-        # Clean up temporary files on exit
+    except Exception as e:
+        logger.error("webserver crashed: {}".format(e))
+        logger.info("Dropping into debug REPL...")
+        pdb.post_mortem()
     for tmp in tempfiles:
         try:
             os.remove(tmp)
