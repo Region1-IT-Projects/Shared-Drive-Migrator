@@ -2,15 +2,14 @@ from nicegui import ui, events
 import uuid
 import logging
 from enum import Enum
-#session imports
-import googleapiclient.discovery as g_discover
-import googleapiclient.errors as g_api_errors
-from google.oauth2 import service_account
-from google.auth.exceptions import RefreshError
-
+from backend import Org
 VERSION = "3.0.0-dev"
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logging.getLogger("nicegui").setLevel(logging.WARNING)
 
 @ui.page("/")
 def main_view():
@@ -34,16 +33,19 @@ class Session:
         self.dark = ui.dark_mode(True) 
         self.stage = Stage.AUTH_SETUP
         self.src_org = None
+        self.src_domain = ""
         self.dst_org = None
+        self.dst_domain = ""
 
     @ui.refreshable
     def router(self):
-
         match self.stage:
             case Stage.AUTH_SETUP:
                 self.render_auth_setup()
             case Stage.MODE_SELECT:
                 self.render_mode_select()
+            case Stage.SINGLE_SETUP:
+                self.render_single_setup()
 
     def go_to(self, stage: Stage):
         """Handle state changes, checking preconditions are met"""
@@ -86,12 +88,12 @@ class Session:
 
     def render_auth_setup(self):
         with ui.column().classes('w-full items-center gap-6'):
-            ui.label("Upload Credentials").classes('text-h4 font-light')
+            ui.label("Authentication Setup").classes('text-h4 font-light')
             
             with ui.row().classes('gap-8 items-stretch'):
                 self.__render_auth_inner(True)
                 self.__render_auth_inner(False)
-            ui.button(text="Continue", on_click= lambda: self.go_to(Stage.MODE_SELECT)).set_enabled(self.__is_auth_configured())
+            ui.button(text="Continue", on_click= lambda :self.go_to(Stage.MODE_SELECT)).set_enabled(self.__is_auth_configured())
 
     def render_mode_select(self):
         # Center everything in a column
@@ -134,7 +136,16 @@ class Session:
 
 
     def render_single_setup(self):
-        pass
+        # Center everything in a column
+        with ui.column().classes('w-full items-center gap-8 p-8'):
+            
+            # Heading Section
+            with ui.column().classes('items-center'):
+                ui.label("User Setup").classes('text-h4 font-light')
+                # autocomplete using src org search_user method
+                ui.label("Search for a user in the source organization to migrate their shared drives").classes('text-grey')
+                user_selector = ui.select(label="Select User", options=[], with_input=True, on_change=self.handle_user_search).props('clearable filterable').props('debounce=250').classes('w-96')
+
 
 
 # ----- Auth Specific Helpers ------
@@ -142,17 +153,30 @@ class Session:
     async def ingest_keyfile(self, e: events.UploadEventArguments, is_src: bool):
         file = await e.file.json()
         try:
-            tmp = service_account.Credentials.from_service_account_info(file)
+            tmp = Org(file)
         except ValueError as e:
-            logging.error(f"Could not parse keyfile {e.file.name}")
-            ui.notify(f"Could not parse keyfile E: {e}!", type="error")
+            ui.notify("Invalid keyfile. Please try again.")
+            logging.warning(f"Ingest keyfile failed! {e}")
             return
         if is_src:
             self.src_org = tmp
-            logging.debug("Set source credentials successfully")
+            try:
+                self.src_org.set_domain(self.src_domain)
+            except ValueError as e:
+                ui.notify("Invalid domain! Check domain format and try again.", type='negative')
+                logging.warning(f"Set source domain failed! Error: {e}")
+                self.src_org = None
+                self.src_domain = ""
         else:
             self.dst_org = tmp
-            logging.debug("Set dest credentials successfully")
+            try:
+                self.dst_org.set_domain(self.dst_domain)
+            except ValueError as e:
+                ui.notify("Invalid domain! Check domain format and try again.", type='negative')
+                logging.warning(f"Set destination domain failed! Error: {e}")
+                self.dst_org = None
+                self.dst_domain = ""
+
         self.router.refresh()
         
     def __render_auth_inner(self, is_src: bool):
@@ -160,6 +184,13 @@ class Session:
         label = "Source" if is_src else "Destination"
         card_classes = 'w-64 p-4 transition-all '
         card_classes += 'border-2 border-green-500 bg-green-50 dark:border-green-700 dark:bg-green-900/30' if current_file else 'border border-gray-200 dark:border-gray-700'
+
+        def set_temp_domain(changedval):
+            domain = changedval.value.strip()
+            if is_src:
+                self.src_domain = domain
+            else:
+                self.dst_domain = domain
 
         with ui.card().classes(card_classes).style('min-height: 180px'):
             with ui.column().classes('w-full items-center justify-center h-full'):
@@ -170,15 +201,17 @@ class Session:
                     ui.button('Change', on_click=lambda: self.__clear_auth_file(is_src)).props('flat dense')
                 else:
                     # UPLOAD STATE
-                    ui.label(f"{label} Keyfile").classes('text-lg font-medium')
+                    ui.label(f"{label} Organization").classes('text-lg font-medium')
+                    domain_input = ui.input(label='Domain', placeholder='example.org', on_change=set_temp_domain, value=(self.src_domain if is_src else self.dst_domain)).classes('w-full').props('debounce=500')
                     ui.upload(
                         label='Select JSON keyfile',
                         auto_upload=True,
                         on_upload=lambda e: self.ingest_keyfile(e, is_src)
-                    ).props('flat bordered').props('accept=.json').classes('w-full')
+                    ).props('flat bordered').props('accept=.json').classes('w-full').bind_enabled_from(domain_input, 'value', backward= lambda v: len(v) > 5 and v.count('.'))
+
 
     def __is_auth_configured(self) -> bool:
-        return self.dst_org is not None and self.src_org is not None
+        return self.dst_org is not None and self.dst_domain is not None and self.src_org is not None and self.src_domain is not None
 
     def __clear_auth_file(self, is_src: bool):
         if is_src:
@@ -187,6 +220,13 @@ class Session:
             self.dst_org = None
         self.router.refresh()
 
+# ----- User Setup Helpers -----
+
+    async def handle_user_search(self, e: events.InputEventArguments, fuzzy_name: str):
+        # TODO add loading state
+        results = self.src_org.search_user(fuzzy_name)
+        logging.debug(f"Search for {fuzzy_name} returned {len(results)} results")
+        # TODO render results in dropdown and allow selection
 
 
 if __name__ in {"__main__", "__mp_main__"}:
