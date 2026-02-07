@@ -1,8 +1,8 @@
-from nicegui import ui, events
+from nicegui import app, ui, events, run
 import uuid
 import logging
 from enum import Enum
-from backend import Org
+from backend import Org, MissingAdminSDK, MigratorError
 VERSION = "3.0.0-dev"
 
 logging.basicConfig(
@@ -11,7 +11,7 @@ logging.basicConfig(
 )
 logging.getLogger("nicegui").setLevel(logging.WARNING)
 
-@ui.page("/")
+@ui.page("/", title="Drive Migration Wizard")
 def main_view():
     session = Session()
     session.render_header()
@@ -136,15 +136,54 @@ class Session:
 
 
     def render_single_setup(self):
-        # Center everything in a column
+        async def handle_user_search(e: events.GenericEventArguments):
+            fuzzy_name = e.args[0].strip()
+            logging.debug(f"User search input changed to '{fuzzy_name}'")
+            if not fuzzy_name:
+                user_selector.options = []
+            else:
+                # Perform the search
+                lookup_spinner.set_visibility(True)
+                try:
+                    results = await run.io_bound(self.src_org.search_user, fuzzy_name)
+                except MissingAdminSDK as e:
+                    ## popup modal
+                    with ui.dialog() as dialog, ui.card().classes('w-96 p-4'):
+                        ui.label("Admin SDK API Not Enabled").classes('text-h5')
+                        ui.label(str(e)).classes('text-sm text-grey-600 dark:text-grey-400')
+                        ui.button("Close", on_click=dialog.close).props('flat color=blue-500').classes('mt-4')
+                except MigratorError as e:
+                    logging.error(f"User search for '{fuzzy_name}' failed: {e}")
+                    ui.notify("An error occurred while searching for users. Please try again.", type='negative')
+                    results = []
+                finally:
+                    lookup_spinner.set_visibility(False)
+                user_selector.options = results
+                
+            user_selector.update()
+            logging.debug(f"Search for '{fuzzy_name}' returned {results}")
+
+        async def finalize_user_selection(e: events.FilterEventArgs):
+            selected_user = e.value
+            logging.debug(f"User selected: {selected_user}")
+            # TODO
+
         with ui.column().classes('w-full items-center gap-8 p-8'):
-            
-            # Heading Section
             with ui.column().classes('items-center'):
                 ui.label("User Setup").classes('text-h4 font-light')
-                # autocomplete using src org search_user method
-                ui.label("Search for a user in the source organization to migrate their shared drives").classes('text-grey')
-                user_selector = ui.select(label="Select User", options=[], with_input=True, on_change=self.handle_user_search).props('clearable filterable').props('debounce=250').classes('w-96')
+                ui.label("Search for a user...").classes('text-grey')
+                
+                user_selector = ui.select(
+                    label="Select User", 
+                    options=[], 
+                    with_input=True, 
+                    on_change=finalize_user_selection
+                ).props('clearable use-input fill-input hide-selected') \
+                .props('debounce=250') \
+                .classes('w-96').on('filter', handle_user_search)
+                with user_selector.add_slot('append'):
+                    lookup_spinner = ui.spinner(size='sm').classes('q-pa-md')
+                    lookup_spinner.set_visibility(False)
 
 
 
@@ -181,8 +220,7 @@ class Session:
         
     def __render_auth_inner(self, is_src: bool):
         current_file = self.src_org if is_src else self.dst_org
-        label = "Source" if is_src else "Destination"
-        card_classes = 'w-64 p-4 transition-all '
+        card_classes = 'w-96 p-4 transition-all '
         card_classes += 'border-2 border-green-500 bg-green-50 dark:border-green-700 dark:bg-green-900/30' if current_file else 'border border-gray-200 dark:border-gray-700'
 
         def set_temp_domain(changedval):
@@ -191,18 +229,21 @@ class Session:
                 self.src_domain = domain
             else:
                 self.dst_domain = domain
+            # check each is unique
+            if self.src_domain == self.dst_domain and self.src_domain != "":
+                ui.notify("Source and Destination domains must be different!", type='negative')
 
         with ui.card().classes(card_classes).style('min-height: 180px'):
             with ui.column().classes('w-full items-center justify-center h-full'):
                 if current_file:
                     # SUCCESS STATE
                     ui.icon('check_circle', color='positive').classes('text-5xl')
-                    ui.label(f"{label} Loaded").classes('text-bold text-green-700')
+                    ui.label(f"{self.src_domain if is_src else self.dst_domain} ready").classes('text-bold text-green-700')
                     ui.button('Change', on_click=lambda: self.__clear_auth_file(is_src)).props('flat dense')
                 else:
                     # UPLOAD STATE
-                    ui.label(f"{label} Organization").classes('text-lg font-medium')
-                    domain_input = ui.input(label='Domain', placeholder='example.org', on_change=set_temp_domain, value=(self.src_domain if is_src else self.dst_domain)).classes('w-full').props('debounce=500')
+                    ui.label(f"{"Source" if is_src else "Destination"} Organization").classes('text-lg font-medium')
+                    domain_input = ui.input(label='Domain', placeholder='example.org', on_change=set_temp_domain, value=(self.src_domain if is_src else self.dst_domain)).classes('w-full').props('debounce=100')
                     ui.upload(
                         label='Select JSON keyfile',
                         auto_upload=True,
@@ -220,14 +261,7 @@ class Session:
             self.dst_org = None
         self.router.refresh()
 
-# ----- User Setup Helpers -----
-
-    async def handle_user_search(self, e: events.InputEventArguments, fuzzy_name: str):
-        # TODO add loading state
-        results = self.src_org.search_user(fuzzy_name)
-        logging.debug(f"Search for {fuzzy_name} returned {len(results)} results")
-        # TODO render results in dropdown and allow selection
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    ui.run()
+    ui.run(storage_secret="supersecret")

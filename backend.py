@@ -3,6 +3,7 @@ import googleapiclient.errors as g_api_errors
 from google.oauth2 import service_account
 from google.auth.exceptions import RefreshError
 import time
+from ssl import SSLError
 
 import logging
 logger = logging.getLogger(__name__)
@@ -28,6 +29,10 @@ class PermissionError(MigratorError):
 class AbusiveContentError(PermissionError):
     pass
 
+class MissingAdminSDK(MigratorError):
+    def __init__(self, helptext):
+        super().__init__(helptext)
+
 class API_wrapper:
     def __init__(self):
         self.total_requests = 0
@@ -35,7 +40,7 @@ class API_wrapper:
         self.total_errors = 0
         self.cur_backoff = 0.01
 
-    def call(self, method):
+    def __call__(self, method):
         self.total_requests += 1
         self.requests_since_error += 1
         try:
@@ -48,6 +53,9 @@ class API_wrapper:
                 if error_reason in ['rateLimitExceeded', 'userRateLimitExceeded', 'quotaExceeded']:
                     logger.info("Rate limit exceeded!")
                     raise RateLimit()
+                if error_reason in ['accessNotConfigured']:
+                    logger.error("Admin SDK API not enabled for this service account!")
+                    raise MissingAdminSDK(e.error_details['message']) 
             elif e.resp.status in [500, 502, 503, 504]:
                 logger.error("google messed up: ",e)
                 raise GoogleIncompetence()
@@ -58,6 +66,11 @@ class API_wrapper:
                 raise PermissionError()
             logger.error(f"Unknown API Error {e.resp.status} - {e.error_details}")
             raise UnknownAPIErr(e)
+        except SSLError as e:
+            logger.error(f"SSL Error: {e}")
+            self.total_errors += 1
+            self.requests_since_error = 0
+            raise GoogleIncompetence()
 
     def calc_backoff(self):
         if self.requests_since_error > 10:
@@ -84,12 +97,15 @@ class Org:
         if not any(domain.endswith('.' + tld) for tld in valid_tlds):
             raise ValueError("Invalid domain! Must end with a valid TLD.")
         self.domain = domain
+        logger.debug(f"ORG Set domain to {domain}")
 
     def search_user(self, fuzzy_name: str, pageToken = None) -> list[str]:
+        logger.debug(f"Searching for user with query {fuzzy_name} in domain {self.domain}, {"[recursive call]" if pageToken else ""}")
         if not self.domain:
+            logger.error("Attempted to search for user without setting domain!")
             raise ValueError("Domain not set!")
         try:
-            query_ret = self.wrapper(self.user_service.list(query=fuzzy_name, domain=self.org_name, pageToken=pageToken))
+            query_ret = self.wrapper(self.user_service.users().list(query=fuzzy_name, domain=self.domain, pageToken=pageToken))
         except MigratorError as e:
             logger.debug(f"Failed to look up user {fuzzy_name} due to {e}")
             return []
@@ -99,5 +115,6 @@ class Org:
                 return []
         if 'nextPageToken' in query_ret.keys():
             return users + self.search_user(fuzzy_name, pageToken=query_ret["nextPageToken"])
+        logger.debug(f"User search complete with {len(users)} results")
         return users
         
