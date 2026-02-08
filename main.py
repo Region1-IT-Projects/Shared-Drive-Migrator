@@ -2,7 +2,7 @@ from nicegui import app, ui, events, run
 import uuid
 import logging
 from enum import Enum
-from backend import Org, MissingAdminSDK, MigratorError
+from backend import Org, SingleMigrator, MissingAdminSDK, MigratorError
 VERSION = "3.0.0-dev"
 
 logging.basicConfig(
@@ -12,19 +12,20 @@ logging.basicConfig(
 logging.getLogger("nicegui").setLevel(logging.WARNING)
 
 @ui.page("/", title="Drive Migration Wizard")
-def main_view():
+async def main_view():
     session = Session()
     session.render_header()
-    session.router()
+    await session.router()
     session.footer_shell()
 
 class Stage(Enum):
         AUTH_SETUP = 0
         MODE_SELECT = 1
-        SINGLE_SETUP = 2
-        SINGLE_PROGRESS = 3
-        BATCH_SETUP = 4
-        BATCH_PROGRESS = 5
+        SINGLE_SETUP_ACCT = 2
+        SINGLE_SETUP_DRIVES = 3
+        SINGLE_PROGRESS = 4
+        BATCH_SETUP = 5
+        BATCH_PROGRESS = 6
 
 class Session:
 
@@ -33,19 +34,20 @@ class Session:
         self.dark = ui.dark_mode(True) 
         self.stage = Stage.AUTH_SETUP
         self.src_org = None
-        self.src_domain = ""
+        self.src_domain_admin = ""
         self.dst_org = None
-        self.dst_domain = ""
+        self.dst_domain_admin = ""
+        self.migrator_obj = None
 
     @ui.refreshable
-    def router(self):
+    async def router(self):
         match self.stage:
             case Stage.AUTH_SETUP:
                 self.render_auth_setup()
             case Stage.MODE_SELECT:
                 self.render_mode_select()
-            case Stage.SINGLE_SETUP:
-                self.render_single_setup()
+            case Stage.SINGLE_SETUP_ACCT:
+                await self.render_single_setup()
 
     def go_to(self, stage: Stage):
         """Handle state changes, checking preconditions are met"""
@@ -117,7 +119,7 @@ class Session:
                         
                         ui.space() # Pushes the button to the bottom
                         
-                        ui.button("Select Single", on_click=lambda: self.go_to(Stage.SINGLE_SETUP)) \
+                        ui.button("Select Single", on_click=lambda: self.go_to(Stage.SINGLE_SETUP_ACCT)) \
                             .props('elevated color=blue-500').classes('w-full mt-4')
 
                 # --- MULTI MODE CARD ---
@@ -135,55 +137,69 @@ class Session:
                             .props('elevated color=orange-500').classes('w-full mt-4')
 
 
-    def render_single_setup(self):
-        async def handle_user_search(e: events.GenericEventArguments):
-            fuzzy_name = e.args[0].strip()
-            logging.debug(f"User search input changed to '{fuzzy_name}'")
-            if not fuzzy_name:
-                user_selector.options = []
-            else:
-                # Perform the search
-                lookup_spinner.set_visibility(True)
-                try:
-                    results = await run.io_bound(self.src_org.search_user, fuzzy_name)
-                except MissingAdminSDK as e:
-                    ## popup modal
-                    with ui.dialog() as dialog, ui.card().classes('w-96 p-4'):
-                        ui.label("Admin SDK API Not Enabled").classes('text-h5')
-                        ui.label(str(e)).classes('text-sm text-grey-600 dark:text-grey-400')
-                        ui.button("Close", on_click=dialog.close).props('flat color=blue-500').classes('mt-4')
-                except MigratorError as e:
-                    logging.error(f"User search for '{fuzzy_name}' failed: {e}")
-                    ui.notify("An error occurred while searching for users. Please try again.", type='negative')
-                    results = []
-                finally:
-                    lookup_spinner.set_visibility(False)
-                user_selector.options = results
-                
-            user_selector.update()
-            logging.debug(f"Search for '{fuzzy_name}' returned {results}")
+    async def render_single_setup(self):
 
-        async def finalize_user_selection(e: events.FilterEventArgs):
+        def render_account_card(title: str, email: str):
+            with ui.card().classes('w-80 p-4'):
+                ui.label(title).classes('text-sm text-grey-600 dark:text-grey-400')
+                ui.label(email).classes('text-lg font-medium')
+
+        async def finalize_user_selection(e: events.ValueChangeEventArguments):
             selected_user = e.value
             logging.debug(f"User selected: {selected_user}")
-            # TODO
+            user_lookup_spinner = ui.spinner(size='md').classes('ml-2')
+            try:
+                source_account = await run.io_bound(self.src_org.find_user, selected_user)
+                dest_account = await run.io_bound(self.dst_org.find_user, selected_user)
+            except MigratorError as e:
+                logging.error(f"Error finding user: {e}")
+                ui.notify("Error finding user! Check logs for details.", type='negative')
+                return
+            if source_account is None:
+                ui.notify(f"User {selected_user} not found in source domain!", type='negative')
+                return
+            if dest_account is None:
+                ui.notify(f"User {selected_user} not found in destination domain!", type='negative')
+                return
+            user_lookup_spinner.remove() # remove spinner once lookup complete
+            self.migrator_obj = SingleMigrator(source_account, dest_account)
+            # unhide account row and populate with details
+            account_row.clear()
+            with account_row:
+                render_account_card("Source Account", source_account.address)
+                ui.icon('arrow_forward', size='32px')
+                render_account_card("Destination Account", source_account.address)
+            account_row.classes('') # unhide row
+        container = ui.column().classes('w-full items-center gap-8 p-8')
+        with container:
+            ui.label("Initializing User Directory...").classes('text-grey')
+            ui.spinner(size='lg')
+            user_list = []
+            try:
+                user_list = await run.io_bound(self.src_org.fetch_users)
+            except MissingAdminSDK as e:
+                ## popup modal
+                with ui.dialog() as dialog, ui.card().classes('w-96 p-4'):
+                    ui.label("Admin SDK API Not Enabled").classes('text-h5')
+                    ui.label(str(e)).classes('text-sm text-grey-600 dark:text-grey-400')
+                    ui.button("Close", on_click=dialog.close).props('flat color=blue-500').classes('mt-4')
+            except Exception as e:
+                logging.error(f"Failed to fetch user list! Error: {e}")
+                ui.notify("Failed to fetch user list! Check logs for details.", type='negative')
+            container.clear()
+            ui.label("User Setup").classes('text-h4 font-light')
+            ui.label("Search for a user...").classes('text-grey')
+            
+            user_selector = ui.select(
+                label="Select User", 
+                options=sorted(user_list), 
+                with_input=True, 
+                on_change=finalize_user_selection
+            ).props('clearable use-input fill-input hide-selected').classes('w-96')
 
-        with ui.column().classes('w-full items-center gap-8 p-8'):
-            with ui.column().classes('items-center'):
-                ui.label("User Setup").classes('text-h4 font-light')
-                ui.label("Search for a user...").classes('text-grey')
-                
-                user_selector = ui.select(
-                    label="Select User", 
-                    options=[], 
-                    with_input=True, 
-                    on_change=finalize_user_selection
-                ).props('clearable use-input fill-input hide-selected') \
-                .props('debounce=250') \
-                .classes('w-96').on('filter', handle_user_search)
-                with user_selector.add_slot('append'):
-                    lookup_spinner = ui.spinner(size='sm').classes('q-pa-md')
-                    lookup_spinner.set_visibility(False)
+            account_row = ui.row().classes('w-full items-center gap-6 justify-center')
+            account_row.classes('hidden') # hide until user selected
+            ui.button(text="Continue", on_click= lambda :self.go_to(Stage.SINGLE_SETUP_DRIVES)).set_enabled(lambda: account_row.classes() != 'hidden')
 
 
 
@@ -200,21 +216,21 @@ class Session:
         if is_src:
             self.src_org = tmp
             try:
-                self.src_org.set_domain(self.src_domain)
+                self.src_org.set_admin(self.src_domain_admin)
             except ValueError as e:
                 ui.notify("Invalid domain! Check domain format and try again.", type='negative')
                 logging.warning(f"Set source domain failed! Error: {e}")
                 self.src_org = None
-                self.src_domain = ""
+                self.src_domain_admin = ""
         else:
             self.dst_org = tmp
             try:
-                self.dst_org.set_domain(self.dst_domain)
+                self.dst_org.set_admin(self.dst_domain_admin)
             except ValueError as e:
                 ui.notify("Invalid domain! Check domain format and try again.", type='negative')
                 logging.warning(f"Set destination domain failed! Error: {e}")
                 self.dst_org = None
-                self.dst_domain = ""
+                self.dst_domain_admin = ""
 
         self.router.refresh()
         
@@ -223,14 +239,14 @@ class Session:
         card_classes = 'w-96 p-4 transition-all '
         card_classes += 'border-2 border-green-500 bg-green-50 dark:border-green-700 dark:bg-green-900/30' if current_file else 'border border-gray-200 dark:border-gray-700'
 
-        def set_temp_domain(changedval):
+        def set_temp_domain_admin(changedval):
             domain = changedval.value.strip()
             if is_src:
-                self.src_domain = domain
+                self.src_domain_admin = domain
             else:
-                self.dst_domain = domain
+                self.dst_domain_admin = domain
             # check each is unique
-            if self.src_domain == self.dst_domain and self.src_domain != "":
+            if self.src_domain_admin == self.dst_domain_admin and self.src_domain_admin != "":
                 ui.notify("Source and Destination domains must be different!", type='negative')
 
         with ui.card().classes(card_classes).style('min-height: 180px'):
@@ -238,12 +254,12 @@ class Session:
                 if current_file:
                     # SUCCESS STATE
                     ui.icon('check_circle', color='positive').classes('text-5xl')
-                    ui.label(f"{self.src_domain if is_src else self.dst_domain} ready").classes('text-bold text-green-700')
+                    ui.label(f"{self.src_domain_admin if is_src else self.dst_domain_admin} ready").classes('text-bold text-green-700')
                     ui.button('Change', on_click=lambda: self.__clear_auth_file(is_src)).props('flat dense')
                 else:
                     # UPLOAD STATE
                     ui.label(f"{"Source" if is_src else "Destination"} Organization").classes('text-lg font-medium')
-                    domain_input = ui.input(label='Domain', placeholder='example.org', on_change=set_temp_domain, value=(self.src_domain if is_src else self.dst_domain)).classes('w-full').props('debounce=100')
+                    domain_input = ui.input(label='Admin Account', placeholder='itdept@example.org', on_change=set_temp_domain_admin, value=(self.src_domain_admin if is_src else self.dst_domain_admin)).classes('w-full').props('debounce=100')
                     ui.upload(
                         label='Select JSON keyfile',
                         auto_upload=True,
@@ -252,7 +268,7 @@ class Session:
 
 
     def __is_auth_configured(self) -> bool:
-        return self.dst_org is not None and self.dst_domain is not None and self.src_org is not None and self.src_domain is not None
+        return self.dst_org is not None and self.dst_domain_admin is not None and self.src_org is not None and self.src_domain_admin is not None
 
     def __clear_auth_file(self, is_src: bool):
         if is_src:

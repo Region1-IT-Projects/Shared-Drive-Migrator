@@ -1,6 +1,8 @@
+from __future__ import annotations
 import googleapiclient.discovery as g_discover
 import googleapiclient.errors as g_api_errors
 from google.oauth2 import service_account
+from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
 import time
 from ssl import SSLError
@@ -81,40 +83,77 @@ class API_wrapper:
             self.cur_backoff = MAX_BACKOFF
         return self.cur_backoff
 
+class User:
+    def __init__(self, name, address, service_account):
+        self.user_name = name
+        self.address = address
+        self.drive_service = g_discover.build("drive", "v3", credentials=service_account.with_subject(address))
+        self.wrapper = API_wrapper()
+        self.users = []
 
+class SingleMigrator:
+    def __init__(self, src_user: User, dst_user: User):
+        self.src_user = src_user
+        self.dst_user = dst_user
+        pass #TODO implement actual migration logic here, this is just a placeholder for now
 
 class Org: 
     def __init__(self, keyfile_dict):
-        self.service_account = service_account.Credentials.from_service_account_info(keyfile_dict, 
+        self.worker = service_account.Credentials.from_service_account_info(keyfile_dict, 
         scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/admin.directory.user.readonly"])
-        self.user_service = g_discover.build("admin", "directory_v1", credentials=self.service_account)
-        self.drive_service = g_discover.build("drive", "v3", credentials=self.service_account)
+        self.user_service = None
         self.wrapper = API_wrapper()
-        self.domain = None
 
-    def set_domain(self, domain):
-        valid_tlds = ['com', 'org', 'net', 'edu']
-        if not any(domain.endswith('.' + tld) for tld in valid_tlds):
-            raise ValueError("Invalid domain! Must end with a valid TLD.")
-        self.domain = domain
-        logger.debug(f"ORG Set domain to {domain}")
-
-    def search_user(self, fuzzy_name: str, pageToken = None) -> list[str]:
-        logger.debug(f"Searching for user with query {fuzzy_name} in domain {self.domain}, {"[recursive call]" if pageToken else ""}")
-        if not self.domain:
-            logger.error("Attempted to search for user without setting domain!")
-            raise ValueError("Domain not set!")
+    def set_admin(self, address: str):
+        # validate address is valid email address
+        if '@' not in address:
+            logger.error(f"Invalid admin email address: {address}")
+            raise ValueError("Invalid email address!")
+        if address.split('.')[-1] not in ['com', 'net', 'org', 'edu']:
+            logger.error(f"Invalid admin email address: {address}")
+            raise ValueError("Invalid email address!")
+        creds = self.worker.with_subject(address)
         try:
-            query_ret = self.wrapper(self.user_service.users().list(query=fuzzy_name, domain=self.domain, pageToken=pageToken))
+            creds.refresh(Request())
+            logger.debug(f"Successfully refreshed credentials for {address}")
+        except RefreshError as e:
+            logger.error(f"Failed to refresh credentials for {address}: {e}")
+            raise ValueError("Invalid admin credentials! Check that the email is correct and that the service account has domain-wide delegation enabled.")
+        logger.info(f"Admin set to {address}")
+        # build user service with admin credentials
+        self.user_service = g_discover.build("admin", "directory_v1", credentials=creds)
+
+    def fetch_users(self, pageToken=None) -> list[dict]:
+        logger.debug(f"Listing all users {'[recursive call]' if pageToken else ''}")
+        if not self.user_service:
+            logger.error("Attempted to search for user without user service instance!")
+            raise ValueError("User service not configured!")
+        try:
+            query_ret = self.wrapper(self.user_service.users().list(customer='my_customer', pageToken=pageToken))
         except MigratorError as e:
-            logger.debug(f"Failed to look up user {fuzzy_name} due to {e}")
+            logger.debug(f"Failed to list users due to {e}")
             return []
-        try:
-            users: list = query_ret['users']
-        except KeyError:
-                return []
-        if 'nextPageToken' in query_ret.keys():
-            return users + self.search_user(fuzzy_name, pageToken=query_ret["nextPageToken"])
-        logger.debug(f"User search complete with {len(users)} results")
+        # filter out just the full name of each user and return as list
+        users: list = []
+        for user in query_ret.get('users', []):
+            try:
+                users.append(user["name"]["fullName"])
+            except KeyError:
+                logger.warning(f"User {user['primaryEmail']} is missing a full name, skipping")
+
+        if 'nextPageToken' in query_ret:
+            return users + self.fetch_users(pageToken=query_ret["nextPageToken"])
+        logger.debug(f"User listing complete with {len(users)} results")
         return users
         
+    def find_user(self, name) -> User:
+
+        query_ret = self.wrapper(self.user_service.users().list(customer='my_customer', query=f'name:"{name}"'))
+
+        if 'users' not in query_ret or len(query_ret['users']) == 0:
+            logger.warning(f"No users found matching name: {name}")
+            return None
+        if len(query_ret['users']) > 1:
+            logger.warning(f"Multiple users found matching name: {name}, using first result")
+        user_info = query_ret['users'][0]
+        return User(name, user_info['primaryEmail'], self.worker)
