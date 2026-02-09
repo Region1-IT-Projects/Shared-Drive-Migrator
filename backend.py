@@ -51,13 +51,14 @@ class API_wrapper:
             self.total_errors += 1
             self.requests_since_error = 0
             if e.resp.status in [403, 429]:
-                error_reason = e.error_details[0] if e.error_details else None
+                error_reason = e.error_details[0]['reason']
+                logger.debug(f"API Error {e.resp.status} - {error_reason}")
                 if error_reason in ['rateLimitExceeded', 'userRateLimitExceeded', 'quotaExceeded']:
                     logger.info("Rate limit exceeded!")
                     raise RateLimit()
                 if error_reason in ['accessNotConfigured']:
                     logger.error("Admin SDK API not enabled for this service account!")
-                    raise MissingAdminSDK(e.error_details['message']) 
+                    raise MissingAdminSDK(e.error_details[0]['message']) 
             elif e.resp.status in [500, 502, 503, 504]:
                 logger.error("google messed up: ",e)
                 raise GoogleIncompetence()
@@ -84,12 +85,12 @@ class API_wrapper:
         return self.cur_backoff
 
 class User:
-    def __init__(self, name, address, service_account):
+    def __init__(self, name, address, service_account, photo_url=None):
         self.user_name = name
         self.address = address
         self.drive_service = g_discover.build("drive", "v3", credentials=service_account.with_subject(address))
         self.wrapper = API_wrapper()
-        self.users = []
+        self.photo = photo_url
 
 class SingleMigrator:
     def __init__(self, src_user: User, dst_user: User):
@@ -103,6 +104,8 @@ class Org:
         scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/admin.directory.user.readonly"])
         self.user_service = None
         self.wrapper = API_wrapper()
+        self.users = []
+
 
     def set_admin(self, address: str):
         # validate address is valid email address
@@ -128,11 +131,9 @@ class Org:
         if not self.user_service:
             logger.error("Attempted to search for user without user service instance!")
             raise ValueError("User service not configured!")
-        try:
-            query_ret = self.wrapper(self.user_service.users().list(customer='my_customer', pageToken=pageToken))
-        except MigratorError as e:
-            logger.debug(f"Failed to list users due to {e}")
-            return []
+
+        query_ret = self.wrapper(self.user_service.users().list(customer='my_customer', pageToken=pageToken))
+
         # filter out just the full name of each user and return as list
         users: list = []
         for user in query_ret.get('users', []):
@@ -143,7 +144,6 @@ class Org:
 
         if 'nextPageToken' in query_ret:
             return users + self.fetch_users(pageToken=query_ret["nextPageToken"])
-        logger.debug(f"User listing complete with {len(users)} results")
         return users
         
     def find_user(self, name) -> User:
@@ -156,4 +156,14 @@ class Org:
         if len(query_ret['users']) > 1:
             logger.warning(f"Multiple users found matching name: {name}, using first result")
         user_info = query_ret['users'][0]
-        return User(name, user_info['primaryEmail'], self.worker)
+        return User(name, user_info['primaryEmail'], self.worker, user_info.get('thumbnailPhotoUrl'))
+
+    def find_user_by_email(self, email) -> User:
+
+        query_ret = self.wrapper(self.user_service.users().list(customer='my_customer', query=f'email:"{email}"'))
+
+        if 'users' not in query_ret or len(query_ret['users']) == 0:
+            logger.warning(f"No users found matching email: {email}")
+            return None
+        user_info = query_ret['users'][0]
+        return User(user_info["name"]["fullName"], email, self.worker, user_info.get('thumbnailPhotoUrl'))

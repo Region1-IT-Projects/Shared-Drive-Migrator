@@ -2,7 +2,11 @@ from nicegui import app, ui, events, run
 import uuid
 import logging
 from enum import Enum
-from backend import Org, SingleMigrator, MissingAdminSDK, MigratorError
+from backend import Org, User, SingleMigrator, MissingAdminSDK, MigratorError
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
 VERSION = "3.0.0-dev"
 
 logging.basicConfig(
@@ -34,9 +38,9 @@ class Session:
         self.dark = ui.dark_mode(True) 
         self.stage = Stage.AUTH_SETUP
         self.src_org = None
-        self.src_domain_admin = ""
+        self.src_domain_admin = os.getenv("SRC_ADMIN_EMAIL", "")
         self.dst_org = None
-        self.dst_domain_admin = ""
+        self.dst_domain_admin = os.getenv("DST_ADMIN_EMAIL", "")
         self.migrator_obj = None
 
     @ui.refreshable
@@ -48,10 +52,18 @@ class Session:
                 self.render_mode_select()
             case Stage.SINGLE_SETUP_ACCT:
                 await self.render_single_setup()
+            case Stage.SINGLE_SETUP_DRIVES:
+                self.render_single_drive_select()
+            case _:
+                ui.label("This stage is not implemented yet!").classes('text-red-500')
 
     def go_to(self, stage: Stage):
         """Handle state changes, checking preconditions are met"""
         match Stage:
+            case Stage.AUTH_SETUP:
+                self.__clear_auth_file(True)
+                self.__clear_auth_file(False)
+                self.stage = Stage.AUTH_SETUP
             case Stage.MODE_SELECT:
                 if not self.__is_auth_configured():
                     # TODO: make this notify more errory
@@ -136,40 +148,88 @@ class Session:
                         ui.button("Select Bulk", on_click=lambda: self.go_to(Stage.BATCH_SETUP)) \
                             .props('elevated color=orange-500').classes('w-full mt-4')
 
+    def show_admin_sdk_error(self, e: MissingAdminSDK):
+        with ui.dialog() as dialog, ui.card().style('width: 60vw; max-width: 800px; min-width: 300px;').classes('p-4'):
+            ui.label("Admin SDK API Not Enabled").classes('text-h5')
+            ui.label("The Google Admin SDK API must be enabled in your Google Cloud Console. Visit: ").classes('text-sm text-grey-600 dark:text-grey-400')
+            # find link in error message
+            for word in e.args[0].split():
+                if word.startswith("http"):
+                    ui.link(word, word, new_tab=True).classes('text-blue-500')
+                    break
+            ui.label("After enabling the Admin SDK API for the service account, reset and try again. Note that the change can take up to 15 minutes to take effect in Google's systems.").classes('text-sm text-grey-600 dark:text-grey-400 mt-2')
+            ui.button("Reset", on_click=lambda: dialog.close() or self.go_to(Stage.MODE_SELECT)).props('elevated color=red-500').classes('w-full mt-4')
+            dialog.open()
 
     async def render_single_setup(self):
+        state = {'src': None, 'dst': None}
 
-        def render_account_card(title: str, email: str):
-            with ui.card().classes('w-80 p-4'):
+        def update_continue_btn():
+            if isinstance(state['src'], User) and isinstance(state['dst'], User):
+                self.migrator_obj = SingleMigrator(state['src'], state['dst'])
+            continue_btn.set_enabled(True)
+
+        @ui.refreshable
+        def render_account_card(title: str, key: str):
+            with ui.card().classes('w-80 p-4').style('min-height: 180px;'):
                 ui.label(title).classes('text-sm text-grey-600 dark:text-grey-400')
-                ui.label(email).classes('text-lg font-medium')
+                acct = state[key]
+                if isinstance(acct, User):
+                    update_continue_btn()
+                    # SUCCESS STATE: Show the address
+                    with ui.column().classes('grow w-full items-center justify-center gap-3'):
+                        # User Avatar with rounded-full for a circle and object-cover to prevent stretching
+                        if acct.photo:
+                            ui.image(acct.photo).classes('w-20 h-20 rounded-full shadow-sm border border-grey-200 object-cover')
+                        else:
+                            # Fallback if the user has no photo set in the Admin SDK
+                            ui.icon('account_circle', size='5rem').classes('text-grey-300')
+                        # User Details
+                        with ui.column().classes('items-center gap-0'):
+                            ui.label(acct.address).classes('text-md font-semibold text-center break-all')
+                else:
+                    # MANUAL STATE: Lookup failed
+                    email_input = ui.input(label="Account Email", placeholder="user@example.com").classes('w-full')
+                    
+                    def handle_manual_set():
+                        if email_input.value:
+                            # Create the User object manually
+                            if key == 'src':
+                                new_user = self.src_org.find_user_by_email(email_input.value.strip())
+                            else:
+                                new_user = self.dst_org.find_user_by_email(email_input.value.strip())
+                            if new_user is None:
+                                ui.notify("No user found with that email! Check the address and try again.", type='negative')
+                                return
+                            state[key] = new_user # Update the state dict
+                            # Refresh this card with the new User object
+
+                            render_account_card.refresh()
+                    
+                    ui.button("Set Address", on_click=handle_manual_set).props('flat')
 
         async def finalize_user_selection(e: events.ValueChangeEventArguments):
             selected_user = e.value
             logging.debug(f"User selected: {selected_user}")
-            user_lookup_spinner = ui.spinner(size='md').classes('ml-2')
-            try:
-                source_account = await run.io_bound(self.src_org.find_user, selected_user)
-                dest_account = await run.io_bound(self.dst_org.find_user, selected_user)
-            except MigratorError as e:
-                logging.error(f"Error finding user: {e}")
-                ui.notify("Error finding user! Check logs for details.", type='negative')
-                return
-            if source_account is None:
-                ui.notify(f"User {selected_user} not found in source domain!", type='negative')
-                return
-            if dest_account is None:
-                ui.notify(f"User {selected_user} not found in destination domain!", type='negative')
-                return
-            user_lookup_spinner.remove() # remove spinner once lookup complete
-            self.migrator_obj = SingleMigrator(source_account, dest_account)
-            # unhide account row and populate with details
-            account_row.clear()
             with account_row:
-                render_account_card("Source Account", source_account.address)
+                ui.spinner(size='md').classes('ml-2')
+                try:
+                    state['src'] = await run.io_bound(self.src_org.find_user, selected_user)
+                    state['dst'] = await run.io_bound(self.dst_org.find_user, selected_user)
+                except MissingAdminSDK as e:
+                    self.show_admin_sdk_error(e)
+                    return
+                except MigratorError as e:
+                    logging.error(f"Error finding user: {e}")
+                    ui.notify("Error finding user! Check logs for details.", type='negative')
+                    return
+                
+                account_row.clear()
+            
+                render_account_card("Source Account", 'src')
                 ui.icon('arrow_forward', size='32px')
-                render_account_card("Destination Account", source_account.address)
-            account_row.classes('') # unhide row
+                render_account_card("Destination Account", 'dst')
+
         container = ui.column().classes('w-full items-center gap-8 p-8')
         with container:
             ui.label("Initializing User Directory...").classes('text-grey')
@@ -178,15 +238,13 @@ class Session:
             try:
                 user_list = await run.io_bound(self.src_org.fetch_users)
             except MissingAdminSDK as e:
-                ## popup modal
-                with ui.dialog() as dialog, ui.card().classes('w-96 p-4'):
-                    ui.label("Admin SDK API Not Enabled").classes('text-h5')
-                    ui.label(str(e)).classes('text-sm text-grey-600 dark:text-grey-400')
-                    ui.button("Close", on_click=dialog.close).props('flat color=blue-500').classes('mt-4')
+                self.show_admin_sdk_error(e)
+                return
             except Exception as e:
                 logging.error(f"Failed to fetch user list! Error: {e}")
                 ui.notify("Failed to fetch user list! Check logs for details.", type='negative')
             container.clear()
+            logging.debug(f"User list fetched with {len(user_list)} users")
             ui.label("User Setup").classes('text-h4 font-light')
             ui.label("Search for a user...").classes('text-grey')
             
@@ -198,10 +256,12 @@ class Session:
             ).props('clearable use-input fill-input hide-selected').classes('w-96')
 
             account_row = ui.row().classes('w-full items-center gap-6 justify-center')
-            account_row.classes('hidden') # hide until user selected
-            ui.button(text="Continue", on_click= lambda :self.go_to(Stage.SINGLE_SETUP_DRIVES)).set_enabled(lambda: account_row.classes() != 'hidden')
+            continue_btn = ui.button("Continue", on_click=lambda: self.go_to(Stage.SINGLE_SETUP_DRIVES)).props('elevated')
+            continue_btn.set_enabled(False)
 
-
+    def render_single_drive_select(self):
+        ui.notify("Drive selection UI not implemented yet!")
+        pass #TODO implement single drive select UI
 
 # ----- Auth Specific Helpers ------
 
