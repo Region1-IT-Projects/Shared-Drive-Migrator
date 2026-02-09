@@ -1,10 +1,20 @@
-from nicegui import app, ui, events, run
-import uuid
 import logging
-from enum import Enum
-from backend import Org, User, SingleMigrator, MissingAdminSDK, MigratorError
 import os
+import uuid
+from enum import Enum
+
 from dotenv import load_dotenv
+from nicegui import events, run, ui
+
+from backend import (
+    APIWrapper,
+    MigratorError,
+    MissingAdminSDKError,
+    Org,
+    SingleMigrator,
+    User,
+)
+
 load_dotenv()
 
 VERSION = "3.0.0-dev"
@@ -35,13 +45,15 @@ class Session:
 
     def __init__(self):
         self.id: str = uuid.uuid4().hex
-        self.dark = ui.dark_mode(True) 
+        self.dark = ui.dark_mode(True)
         self.stage = Stage.AUTH_SETUP
         self.src_org = None
         self.src_domain_admin = os.getenv("SRC_ADMIN_EMAIL", "")
         self.dst_org = None
         self.dst_domain_admin = os.getenv("DST_ADMIN_EMAIL", "")
         self.migrator_obj = None
+        self.api_wrapper = APIWrapper()
+        ui.timer(1, self.render_footer.refresh)
 
     @ui.refreshable
     async def router(self):
@@ -82,7 +94,7 @@ class Session:
             with ui.row().classes('items-center gap-3'):
                 ui.icon('auto_awesome', color='white').classes('text-2xl')
                 ui.label('Drive Migration Wizard').classes('text-xl font-bold')
-            
+
             with ui.row().classes('items-center gap-4'):
                 ui.badge(VERSION)
                 ui.switch(text="Dark Mode").bind_value(self.dark).props('color=amber').classes('text-white')
@@ -95,7 +107,7 @@ class Session:
     def render_footer(self):
         with ui.row().classes('w-full items-center justify-between'):
             # TODO: api rate limit details
-            ui.label('Filler API info').classes('text-xs')
+            ui.label(str(self.api_wrapper)).classes('text-xs')
             ui.label(f'Stage: {self.stage.name.replace("_", " ").title()}').classes('text-xz tracking-widest')
 
 # ----- Main Renderers -------
@@ -103,7 +115,7 @@ class Session:
     def render_auth_setup(self):
         with ui.column().classes('w-full items-center gap-6'):
             ui.label("Authentication Setup").classes('text-h4 font-light')
-            
+
             with ui.row().classes('gap-8 items-stretch'):
                 self.__render_auth_inner(True)
                 self.__render_auth_inner(False)
@@ -112,43 +124,41 @@ class Session:
     def render_mode_select(self):
         # Center everything in a column
         with ui.column().classes('w-full items-center gap-8 p-8'):
-            
+
             # Heading Section
             with ui.column().classes('items-center'):
                 ui.label("Migration Mode").classes('text-h4 font-light')
                 ui.label("Choose migration workflow for this session").classes('text-grey')
 
             with ui.row().classes('w-full justify-center items-stretch gap-8'):
-                
+
                 # --- SINGLE MODE CARD ---
-                with ui.card().classes('w-80 p-6 shadow-lg border-t-4 border-blue-500 transition-transform'):
-                    with ui.column().classes('items-center text-center h-full'):
-                        ui.icon('person', size='64px', color='blue-500')
-                        ui.label("Single User").classes('text-xl font-bold mt-2')
-                        
-                        ui.label("Migrate a single user at a time. Allows for fine-grained control over specific shared drives.") \
-                            .classes('text-sm text-grey-600 dark:text-grey-400 mt-4 h-24')
-                        
-                        ui.space() # Pushes the button to the bottom
-                        
-                        ui.button("Select Single", on_click=lambda: self.go_to(Stage.SINGLE_SETUP_ACCT)) \
-                            .props('elevated color=blue-500').classes('w-full mt-4')
+                with ui.card().classes('w-80 p-6 shadow-lg border-t-4 border-blue-500 transition-transform'), ui.column().classes('items-center text-center h-full'):
+                    ui.icon('person', size='64px', color='blue-500')
+                    ui.label("Single User").classes('text-xl font-bold mt-2')
+
+                    ui.label("Migrate a single user at a time. Allows for fine-grained control over specific shared drives.") \
+                        .classes('text-sm text-grey-600 dark:text-grey-400 mt-4 h-24')
+
+                    ui.space() # Pushes the button to the bottom
+
+                    ui.button("Select Single", on_click=lambda: self.go_to(Stage.SINGLE_SETUP_ACCT)) \
+                        .props('elevated color=blue-500').classes('w-full mt-4')
 
                 # --- MULTI MODE CARD ---
-                with ui.card().classes('w-80 p-6 shadow-lg border-t-4 border-orange-500 transition-transform'):
-                    with ui.column().classes('items-center text-center h-full'):
-                        ui.icon('groups', size='64px', color='orange-500')
-                        ui.label("Bulk Migration").classes('text-xl font-bold mt-2')
-                        
-                        ui.label("Migrate multiple users at a time in a 'batch'. All owned shared drives will be migrated.") \
-                            .classes('text-sm text-grey-600 dark:text-grey-400 mt-4 h-24')
-                        
-                        ui.space() # Pushes the button to the bottom
-                        
-                        ui.button("Select Bulk", on_click=lambda: self.go_to(Stage.BATCH_SETUP)) \
-                            .props('elevated color=orange-500').classes('w-full mt-4')
+                with ui.card().classes('w-80 p-6 shadow-lg border-t-4 border-orange-500 transition-transform'), ui.column().classes('items-center text-center h-full'):
+                    ui.icon('groups', size='64px', color='orange-500')
+                    ui.label("Bulk Migration").classes('text-xl font-bold mt-2')
 
-    def show_admin_sdk_error(self, e: MissingAdminSDK):
+                    ui.label("Migrate multiple users at a time in a 'batch'. All owned shared drives will be migrated.") \
+                        .classes('text-sm text-grey-600 dark:text-grey-400 mt-4 h-24')
+
+                    ui.space() # Pushes the button to the bottom
+
+                    ui.button("Select Bulk", on_click=lambda: self.go_to(Stage.BATCH_SETUP)) \
+                        .props('elevated color=orange-500').classes('w-full mt-4')
+
+    def show_admin_sdk_error(self, e: MissingAdminSDKError):
         with ui.dialog() as dialog, ui.card().style('width: 60vw; max-width: 800px; min-width: 300px;').classes('p-4'):
             ui.label("Admin SDK API Not Enabled").classes('text-h5')
             ui.label("The Google Admin SDK API must be enabled in your Google Cloud Console. Visit: ").classes('text-sm text-grey-600 dark:text-grey-400')
@@ -190,7 +200,7 @@ class Session:
                 else:
                     # MANUAL STATE: Lookup failed
                     email_input = ui.input(label="Account Email", placeholder="user@example.com").classes('w-full')
-                    
+
                     def handle_manual_set():
                         if email_input.value:
                             # Create the User object manually
@@ -205,7 +215,7 @@ class Session:
                             # Refresh this card with the new User object
 
                             render_account_card.refresh()
-                    
+
                     ui.button("Set Address", on_click=handle_manual_set).props('flat')
 
         async def finalize_user_selection(e: events.ValueChangeEventArguments):
@@ -216,16 +226,16 @@ class Session:
                 try:
                     state['src'] = await run.io_bound(self.src_org.find_user, selected_user)
                     state['dst'] = await run.io_bound(self.dst_org.find_user, selected_user)
-                except MissingAdminSDK as e:
+                except MissingAdminSDKError as e:
                     self.show_admin_sdk_error(e)
                     return
                 except MigratorError as e:
                     logging.error(f"Error finding user: {e}")
                     ui.notify("Error finding user! Check logs for details.", type='negative')
                     return
-                
+
                 account_row.clear()
-            
+
                 render_account_card("Source Account", 'src')
                 ui.icon('arrow_forward', size='32px')
                 render_account_card("Destination Account", 'dst')
@@ -237,7 +247,7 @@ class Session:
             user_list = []
             try:
                 user_list = await run.io_bound(self.src_org.fetch_users)
-            except MissingAdminSDK as e:
+            except MissingAdminSDKError as e:
                 self.show_admin_sdk_error(e)
                 return
             except Exception as e:
@@ -247,11 +257,11 @@ class Session:
             logging.debug(f"User list fetched with {len(user_list)} users")
             ui.label("User Setup").classes('text-h4 font-light')
             ui.label("Search for a user...").classes('text-grey')
-            
-            user_selector = ui.select(
-                label="Select User", 
-                options=sorted(user_list), 
-                with_input=True, 
+
+            ui.select(
+                label="Select User",
+                options=sorted(user_list),
+                with_input=True,
                 on_change=finalize_user_selection
             ).props('clearable use-input fill-input hide-selected').classes('w-96')
 
@@ -268,7 +278,7 @@ class Session:
     async def ingest_keyfile(self, e: events.UploadEventArguments, is_src: bool):
         file = await e.file.json()
         try:
-            tmp = Org(file)
+            tmp = Org(file, self.api_wrapper)
         except ValueError as e:
             ui.notify("Invalid keyfile. Please try again.")
             logging.warning(f"Ingest keyfile failed! {e}")
@@ -293,7 +303,7 @@ class Session:
                 self.dst_domain_admin = ""
 
         self.router.refresh()
-        
+
     def __render_auth_inner(self, is_src: bool):
         current_file = self.src_org if is_src else self.dst_org
         card_classes = 'w-96 p-4 transition-all '
@@ -309,22 +319,21 @@ class Session:
             if self.src_domain_admin == self.dst_domain_admin and self.src_domain_admin != "":
                 ui.notify("Source and Destination domains must be different!", type='negative')
 
-        with ui.card().classes(card_classes).style('min-height: 180px'):
-            with ui.column().classes('w-full items-center justify-center h-full'):
-                if current_file:
-                    # SUCCESS STATE
-                    ui.icon('check_circle', color='positive').classes('text-5xl')
-                    ui.label(f"{self.src_domain_admin if is_src else self.dst_domain_admin} ready").classes('text-bold text-green-700')
-                    ui.button('Change', on_click=lambda: self.__clear_auth_file(is_src)).props('flat dense')
-                else:
-                    # UPLOAD STATE
-                    ui.label(f"{"Source" if is_src else "Destination"} Organization").classes('text-lg font-medium')
-                    domain_input = ui.input(label='Admin Account', placeholder='itdept@example.org', on_change=set_temp_domain_admin, value=(self.src_domain_admin if is_src else self.dst_domain_admin)).classes('w-full').props('debounce=100')
-                    ui.upload(
-                        label='Select JSON keyfile',
-                        auto_upload=True,
-                        on_upload=lambda e: self.ingest_keyfile(e, is_src)
-                    ).props('flat bordered').props('accept=.json').classes('w-full').bind_enabled_from(domain_input, 'value', backward= lambda v: len(v) > 5 and v.count('.'))
+        with ui.card().classes(card_classes).style('min-height: 180px'), ui.column().classes('w-full items-center justify-center h-full'):
+            if current_file:
+                # SUCCESS STATE
+                ui.icon('check_circle', color='positive').classes('text-5xl')
+                ui.label(f"{self.src_domain_admin if is_src else self.dst_domain_admin} ready").classes('text-bold text-green-700')
+                ui.button('Change', on_click=lambda: self.__clear_auth_file(is_src)).props('flat dense')
+            else:
+                # UPLOAD STATE
+                ui.label(f"{"Source" if is_src else "Destination"} Organization").classes('text-lg font-medium')
+                domain_input = ui.input(label='Admin Account', placeholder='itdept@example.org', on_change=set_temp_domain_admin, value=(self.src_domain_admin if is_src else self.dst_domain_admin)).classes('w-full').props('debounce=100')
+                ui.upload(
+                    label='Select JSON keyfile',
+                    auto_upload=True,
+                    on_upload=lambda e: self.ingest_keyfile(e, is_src)
+                ).props('flat bordered').props('accept=.json').classes('w-full').bind_enabled_from(domain_input, 'value', backward= lambda v: len(v) > 5 and v.count('.'))
 
 
     def __is_auth_configured(self) -> bool:
