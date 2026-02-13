@@ -11,9 +11,11 @@ from backend import (
     MigratorError,
     MissingAdminSDKError,
     Org,
+    SharedDrive,
     SingleMigrator,
     User,
 )
+import pdb
 
 load_dotenv()
 
@@ -65,7 +67,9 @@ class Session:
             case Stage.SINGLE_SETUP_ACCT:
                 await self.render_single_setup()
             case Stage.SINGLE_SETUP_DRIVES:
-                self.render_single_drive_select()
+                await self.render_single_drive_select()
+            case Stage.SINGLE_PROGRESS:
+                await self.render_single_progress()
             case _:
                 ui.label("This stage is not implemented yet!").classes('text-red-500')
 
@@ -269,9 +273,73 @@ class Session:
             continue_btn = ui.button("Continue", on_click=lambda: self.go_to(Stage.SINGLE_SETUP_DRIVES)).props('elevated')
             continue_btn.set_enabled(False)
 
-    def render_single_drive_select(self):
-        ui.notify("Drive selection UI not implemented yet!")
-        pass #TODO implement single drive select UI
+    async def render_single_drive_select(self):
+        container = ui.column().classes('w-full items-center gap-8 p-8')
+        with container:
+            ui.label("Loading drives...").classes('text-grey')
+            ui.spinner(size='lg')
+        try:
+            drive_list: list[SharedDrive] = await run.io_bound(self.migrator_obj.src_user.get_drives)
+        except Exception as e:
+            pdb.post_mortem()
+            logging.error(f"Failed to fetch drive list: {e}")
+            ui.notify("Failed to fetch drives. Check logs for details.", type='negative')
+            container.clear()
+            return
+
+        container.clear()
+        ui.label("Select Drives to Migrate").classes('text-h4 font-light')
+        ui.label("Choose which shared drives to migrate for this user. Toggle drives to exclude them.").classes('text-grey')
+        switches: dict = {}
+        migrate_personal_switch = None
+        with ui.card().classes('w-full p-4').style('max-height: 50vh; overflow:auto'):
+            with ui.row().classes('w-full items-center justify-between'):
+                with ui.column().classes('items-start'):
+                    ui.label("Personal Google Drive").classes('text-md font-medium text-orange-500')
+                migrate_personal_switch = ui.switch(value=True).props('color=orange')
+            if not drive_list:
+                ui.label("No shared drives found for this user.").classes('text-grey')
+            else:
+                for drive in drive_list:
+                    if not isinstance(drive, SharedDrive):
+                        logging.error(f"Expected SharedDrive instance, got {type(drive)}. Skipping.")
+                        continue
+                    if drive.migrated:
+                        logging.info(f"Drive {drive} already migrated, skipping.")
+                        continue
+                    drive_name = str(drive)
+                    drive_id = drive.id
+
+                    with ui.row().classes('w-full items-center justify-between'):
+                        with ui.column().classes('items-start'):
+                            ui.label(drive_name).classes('text-md font-medium')
+                            ui.label(str(drive_id)).classes('text-xs text-grey-500')
+                        switches[drive_id] = ui.switch(value=True)
+
+        # Buttons row
+        with ui.row().classes('w-full items-center justify-end gap-4'):
+            def handle_continue():
+                selected = []
+                for idx, drive in enumerate(drive_list):
+                    drive_id = getattr(drive, 'id', None) or f"drive-{idx}"
+                    sw = switches.get(drive_id)
+                    if sw and sw.value:
+                        selected.append(drive)
+                personal = migrate_personal_switch.value if migrate_personal_switch is not None else True
+                self.migrator_obj.start_migration(selected, personal)
+                logging.debug(f"Selected drives: {[getattr(d, 'id', str(d)) for d in selected]}")
+                ui.notify(f"Migration started for {len(selected)} drives")
+                self.go_to(Stage.SINGLE_PROGRESS)
+
+            ui.button("Continue", on_click=handle_continue).props('elevated')
+
+    async def render_single_progress(self):
+        container = ui.column().classes('w-full items-center gap-8 p-8')
+        with container:
+            ui.label("Migration in Progress").classes('text-h4 font-light')
+            ui.label("Migrating shared drives...").classes('text-grey')
+            ui.spinner(size='lg')
+        # TODO implement actual progress tracking and update this view accordingly
 
 # ----- Auth Specific Helpers ------
 

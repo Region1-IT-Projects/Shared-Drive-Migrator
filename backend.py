@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from ssl import SSLError
 
 import googleapiclient.discovery as g_discover
@@ -46,7 +47,20 @@ class APIWrapper:
     def __str__(self):
         return f"Requests: {self.total_requests} ({self.requests_since_error} since last error), Errors:{self.total_errors}, Backoff: {self.cur_backoff:.2f}s"
 
-    def __call__(self, method):
+    def __call__(self, method, retries = 0, retryable_errors = (RateLimitError, GoogleIncompetenceError)):
+        try:
+            return self.run(method)
+        except retryable_errors as e:
+            if retries < 5:
+                backoff_time = self.calc_backoff()
+                logger.info(f"Backing off for {backoff_time:.2f} seconds before retrying...")
+                time.sleep(backoff_time)
+                return self.__call__(method, retries + 1)
+            else:
+                logger.error(f"Max retries exceeded for method {method}, giving up.")
+                raise e
+
+    def run(self, method):
         self.total_requests += 1
         self.requests_since_error += 1
         try:
@@ -72,14 +86,14 @@ class APIWrapper:
                     raise AbusiveContentError() from e
                 raise PermissionError() from e
             logger.error(f"Unknown API Error {e.resp.status} - {e.error_details}")
-            raise UnknownAPIError() from e
+            raise UnknownAPIError(e) from e
         except SSLError as e:
             logger.error(f"SSL Error: {e}")
             self.total_errors += 1
             self.requests_since_error = 0
             raise GoogleIncompetenceError() from e
 
-    def calc_backoff(self):
+    def calc_backoff(self) -> float:
         if self.requests_since_error > 10:
             self.cur_backoff /=2
         elif self.requests_since_error == 0:
@@ -88,18 +102,61 @@ class APIWrapper:
             self.cur_backoff = MAX_BACKOFF
         return self.cur_backoff
 
+class File:
+    def __init__(self, infodict: dict):
+        self.id = infodict['id']
+        self.name = infodict['name']
+        self.mime_type = infodict['mimeType']
+        self.trashed = infodict.get('trashed', False)
+        self.permissions = infodict.get('permissions', [])
+        self.parents = infodict.get('parents', [])
+
+class SharedDrive:
+    def __init__(self, infodict: dict):
+        self.id = infodict['id']
+        self.name = infodict['name']
+        self.hidden = infodict.get('hidden', False)
+        self.restrictions = infodict.get('restrictions', {})
+        self.migrated: bool = "migrated" in self.name.lower()
+        self.files: list[File] = []
+        self.failed_files: list[File] = []
+    def __str__(self):
+        return str(self.name)
+
 class User:
     def __init__(self, name, address, service_account, photo_url, api_wrapper: APIWrapper):
         self.user_name = name
         self.address = address
         self.drive_service = g_discover.build("drive", "v3", credentials=service_account.with_subject(address))
         self.photo = photo_url
-        self.wrapper = api_wrapper
+        self.wrapper: APIWrapper = api_wrapper
+        self.drives: list[SharedDrive] = []
     def __str__(self):
         return f"User(name={self.user_name}, address={self.address})"
-    def get_drives(self):
-        #TODO implement drive fetching logic here
-        pass
+
+    def _check_permissions(self, object_id, page_token=None) -> str:
+        resp = self.wrapper(
+            self.drive_service.permissions()
+            .list(fileId=object_id, pageToken=page_token, supportsAllDrives=True, fields="nextPageToken, permissions(id, role, emailAddress)"),
+            retries=5)
+        permissions: list = resp.get('permissions', [])
+        if 'nextPageToken' in resp:
+            permissions += self._check_permissions(object_id, page_token=resp['nextPageToken'])
+        for perm in permissions:
+            if perm['emailAddress'] == self.address:
+                return perm['role']
+
+    def get_drives(self) -> list[SharedDrive]:
+        api_resp: dict = self.wrapper(self.drive_service.drives().list(fields="drives(id, name, hidden, restrictions)"))
+        for d in api_resp.get('drives', []):
+            if self._check_permissions(d['id']) in ['owner', 'organizer']:
+                try:
+                    drive = SharedDrive(d)
+                    self.drives.append(drive)
+                except KeyError as e:
+                    logger.warning(f"Drive {d['id']} is missing expected fields, skipping: {e}")
+                    continue
+        return self.drives
 
 
 class SingleMigrator:
@@ -108,7 +165,9 @@ class SingleMigrator:
             raise ValueError("Invalid source or destination user! Both must be valid User objects.")
         self.src_user = src_user
         self.dst_user = dst_user
-        pass #TODO implement actual migration logic here, this is just a placeholder for now
+
+    def start_migration(self, drives: list[SharedDrive], migrate_personal_drive: bool):
+        pass #TODO
 
 class Org:
     def __init__(self, keyfile_dict, wrapper: APIWrapper):

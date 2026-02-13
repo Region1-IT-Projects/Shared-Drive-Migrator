@@ -9,3 +9,8 @@ Term | Description
 Org | A google workspace organization. 1:1 mapped to a keyfile.
 User | A user within *both* organizations whose associated content will be moved
 Drive | A shared / team drive 
+
+## LLM Usage Disclosure
+
+Portions of the frontend UI of this program were generated using large language models.
+<!-- I know; I'm disappointed in me, too -->
