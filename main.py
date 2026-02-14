@@ -291,6 +291,7 @@ class Session:
         ui.label("Select Drives to Migrate").classes('text-h4 font-light')
         ui.label("Choose which shared drives to migrate for this user. Toggle drives to exclude them.").classes('text-grey')
         switches: dict = {}
+        successors_selects: dict = {}
         migrate_personal_switch = None
         with ui.card().classes('w-full p-4').style('max-height: 50vh; overflow:auto'):
             with ui.row().classes('w-full items-center justify-between'):
@@ -314,6 +315,10 @@ class Session:
                         with ui.column().classes('items-start'):
                             ui.label(drive_name).classes('text-md font-medium')
                             ui.label(str(drive_id)).classes('text-xs text-grey-500')
+                            # If this drive has possible successors, show a dropdown to pick one
+                            if drive.possible_successors:
+                                options = [("Create a new drive", None)] + [ (f"{s.name} ({s.id})", s) for s in drive.possible_successors ]
+                                successors_selects[drive_id] = ui.select(label='Migrate Into', options=options, value=None).classes('w-64').props('clearable')
                         switches[drive_id] = ui.switch(value=True)
 
         # Buttons row
@@ -325,8 +330,18 @@ class Session:
                     sw = switches.get(drive_id)
                     if sw and sw.value:
                         selected.append(drive)
+                # Apply any selected successors: if a successor was chosen, set it on the drive
+                for d in selected:
+                    did = d.id
+                    sel = successors_selects.get(did)
+                    if sel is not None and sel.value is not None:
+                        try:
+                            d.set_successor(sel.value)
+                        except Exception as e:
+                            logging.error(f"Failed to set successor for drive {did}: {e}")
+
                 personal = migrate_personal_switch.value if migrate_personal_switch is not None else True
-                self.migrator_obj.start_migration(selected, personal)
+                self.migrator_obj.init_migration(selected, personal)
                 logging.debug(f"Selected drives: {[getattr(d, 'id', str(d)) for d in selected]}")
                 ui.notify(f"Migration started for {len(selected)} drives")
                 self.go_to(Stage.SINGLE_PROGRESS)
