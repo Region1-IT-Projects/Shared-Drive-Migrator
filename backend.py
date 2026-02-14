@@ -50,24 +50,26 @@ class APIWrapper:
     def __str__(self):
         return f"Requests: {self.total_requests} ({self.requests_since_error} since last error), Errors:{self.total_errors}, Backoff: {self.cur_backoff:.2f}s"
 
-    def __call__(self, method, retries = 0, retryable_errors = (RateLimitError, GoogleIncompetenceError)):
+    def __call__(self, method, retries = 0, retryable_errors = (RateLimitError, GoogleIncompetenceError), **kwargs):
         try:
-            return self.run(method)
+            return self.run(method, **kwargs)
         except retryable_errors as e:
             if retries < 5:
                 backoff_time = self.calc_backoff()
                 logger.info(f"Backing off for {backoff_time:.2f} seconds before retrying...")
                 time.sleep(backoff_time)
-                return self.__call__(method, retries + 1)
+                return self.__call__(method, retries + 1, retryable_errors=retryable_errors, **kwargs)
             else:
                 logger.error(f"Max retries exceeded for method {method}, giving up.")
                 raise e
 
-    def run(self, method):
+    def run(self, method, **kwargs):
         self.total_requests += 1
         self.requests_since_error += 1
+        # global overwrite to include support for shared drives
+        kwargs['supportsAllDrives'] = True
         try:
-            return method.execute()
+            return method(**kwargs).execute()
         except g_api_errors.HttpError as e:
             self.total_errors += 1
             self.requests_since_error = 0
@@ -120,21 +122,20 @@ class File:
         self.parent_id = parentlist[0] if len(parentlist) == 1 else None
         self.children: list[File] = []
 
-class SharedDrive:
-    def __init__(self, infodict: dict):
-        self.id = infodict['id']
-        self.name = infodict['name']
-        self.hidden = infodict.get('hidden', False)
-        self.restrictions = infodict.get('restrictions', {})
-        self.migrated: bool = "migrated" in self.name.lower()
+class Drive:
+    """
+    Generic drive class for both shared drives and personal drives
+    """
+    def __init__(self, id: str):
+        self.id = id
+        self.name = "Personal Drive"
         self.num_files = 0
         self.num_migrated_files = 0
         self.status_message = "Not started"
         self.root: list[File] = []
         self.failed_files: list[File] = []
-        # successor system allows resubility of already migrated drives in case of migration failure or partial migration
-        self.possible_successors: list[SharedDrive] = []
-        self.successor: SharedDrive | None = None
+        self.initialized = False
+
     def __str__(self):
         return str(self.name)
 
@@ -147,24 +148,41 @@ class SharedDrive:
             'failed_files': [f.name for f in self.failed_files]
         }
 
-    def add_successor(self, drive: SharedDrive):
-        self.possible_successors.append(drive)
-
-    def set_successor(self, drive: SharedDrive):
-        if drive not in self.possible_successors:
-            logger.warning(f"Setting successor to drive {drive} which was not identified as a possible successor for drive {self}")
-        self.successor = drive
-
     def build_filetree(self, files: list[dict]):
         tempdict = {}
         for f in files:
-            tempdict[f['id']] = File(f)
+            newf = File(f)
+            if newf.trashed or newf.is_invalid:
+                logger.debug(f"Skipping file {newf.name} (id: {newf.id}) in drive {self.name} because it is {'trashed' if newf.trashed else 'invalid'}")
+                continue
+            tempdict[f['id']] = newf
         self.num_files = len(tempdict)
         for f in tempdict.values():
             if f.parent_id and f.parent_id in tempdict:
                 tempdict[f.parent_id].children.append(f)
             else:
                 self.root.append(f)
+        self.initialized = True
+
+class SharedDrive(Drive):
+    def __init__(self, infodict: dict):
+            super().__init__(infodict['id'])
+            self.name = infodict['name']
+            self.hidden = infodict.get('hidden', False)
+            self.restrictions = infodict.get('restrictions', {})
+            self.migrated: bool = "migrated" in self.name.lower()
+
+            # successor system allows resubility of already migrated drives in case of migration failure or partial migration
+            self.possible_successors: list[SharedDrive] = []
+            self.successor: SharedDrive | None = None
+
+    def add_potential_successor(self, drive: SharedDrive):
+        self.possible_successors.append(drive)
+
+    def set_successor(self, drive: SharedDrive):
+        if drive not in self.possible_successors:
+            logger.warning(f"Setting successor to drive {drive} which was not identified as a possible successor for drive {self}")
+        self.successor = drive
 
 
 class User:
@@ -174,6 +192,9 @@ class User:
         self.drive_service = g_discover.build("drive", "v3", credentials=service_account.with_subject(address))
         self.photo = photo_url
         self.wrapper: APIWrapper = api_wrapper
+        self.personal_drive = Drive(
+            self.wrapper(self.drive_service.files().get, fileId='root', fields='id', retries=2)['id']
+        )
         self.drives: list[SharedDrive] = []
         self.outstanding_shares: dict[str, str] = {} # permission id -> object id for shares that have been made but not yet removed
     def __str__(self):
@@ -181,8 +202,8 @@ class User:
 
     def _check_permissions(self, object_id, page_token=None) -> str:
         resp = self.wrapper(
-            self.drive_service.permissions()
-            .list(fileId=object_id, pageToken=page_token, supportsAllDrives=True, fields="nextPageToken, permissions(id, role, emailAddress)"),
+            self.drive_service.permissions().list,
+            fileId=object_id, pageToken=page_token, fields="nextPageToken, permissions(id, role, emailAddress)",
             retries=5)
         permissions: list = resp.get('permissions', [])
         if 'nextPageToken' in resp:
@@ -192,7 +213,7 @@ class User:
                 return perm['role']
 
     def get_drives(self) -> list[SharedDrive]:
-        api_resp: dict = self.wrapper(self.drive_service.drives().list(fields="drives(id, name, hidden, restrictions)"))
+        api_resp: dict = self.wrapper(self.drive_service.drives().list, fields="drives(id, name, hidden, restrictions)")
         for d in api_resp.get('drives', []):
             if self._check_permissions(d['id']) in ['owner', 'organizer']:
                 try:
@@ -209,7 +230,7 @@ class User:
             'role': role,
             'emailAddress': email
         }
-        resp = self.wrapper(self.drive_service.permissions().create(fileId=object_id, body=new_perm, supportsAllDrives=True))
+        resp = self.wrapper(self.drive_service.permissions().create, fileId=object_id, body=new_perm)
         id = resp.get('id', None)
         if not id:
             logger.error(f"Failed to share object {object_id} with {email}")
@@ -221,7 +242,7 @@ class User:
     def remove_share(self, object_id, permission_id):
         if permission_id not in self.outstanding_shares:
             logger.warning(f"Attempting to remove permission {permission_id} which is not in outstanding shares for user {self.address}")
-        self.wrapper(self.drive_service.permissions().delete(fileId=object_id, permissionId=permission_id, supportsAllDrives=True))
+        self.wrapper(self.drive_service.permissions().delete, fileId=object_id, permissionId=permission_id)
         logger.debug(f"Removed share {permission_id} from object {object_id}")
         self.outstanding_shares.pop(permission_id, None)
 
@@ -240,15 +261,16 @@ class User:
             'hidden': predecessor_drive.hidden,
             'themeId': 'abacus'
         }
-        resp = self.wrapper(self.drive_service.drives().create(body=body, requestId=uuid.uuid4().hex, fields="id, name, hidden, restrictions"))
+        resp = self.wrapper(self.drive_service.drives().create, body=body, requestId=uuid.uuid4().hex, fields="id, name, hidden, restrictions")
         new_drive = SharedDrive(resp)
         self.drives.append(new_drive)
         return new_drive
 
     def _fetch_files(self, token: str | None = None, **kwargs) -> list[dict]:
-        query_ret: dict = self.wrapper(self.drive_service.files().list(pageToken=token,
+        query_ret: dict = self.wrapper(self.drive_service.files().list,
+                                      pageToken=token,
                                       fields="nextPageToken, files(id, name, kind, mimeType, parents, owners, trashed, properties)",
-                                      **kwargs))
+                                      **kwargs)
         if query_ret is None:
             return []
         try:
@@ -262,9 +284,13 @@ class User:
             file_list += self.__fetch_files(query_ret['nextPageToken'], **kwargs)
         return file_list
 
-    def index_drive_files(self, drive: SharedDrive):
-        file_list = self.__fetch_files(driveId=drive.id, supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="drive", q="trashed=false")
+    def index_shared_drive_files(self, drive: SharedDrive):
+        file_list = self.__fetch_files(driveId=drive.id, includeItemsFromAllDrives=True, corpora="drive", q="trashed=false")
         drive.build_filetree(file_list)
+
+    def index_personal_drive_files(self):
+        file_list = self.__fetch_files(corpora="user", q="trashed=false", supportsAllDrives=False, includeItemsFromAllDrives=False)
+        self.personal_drive.build_filetree(file_list)
 
 
 class SingleMigrator:
@@ -302,7 +328,7 @@ class SingleMigrator:
                     'migrator_source_id': folder.id
                 }
             }
-            resp = self.dst_user.wrapper(self.dst_user.drive_service.files().create(body=new_file, supportsAllDrives=True, fields="id"))
+            resp = self.dst_user.wrapper(self.dst_user.drive_service.files().create, body=new_file, fields="id")
             new_id = resp.get('id', None)
             if not new_id:
                 logger.error(f"Failed to create folder {folder.name} in drive {new_drive.name}")
@@ -310,7 +336,7 @@ class SingleMigrator:
             id_map[folder.id] = new_id
             # mark old folder as migrated by adding property with new folder id
             try:
-                self.src_user.wrapper(self.src_user.drive_service.files().update(fileId=folder.id, body={'properties': {'migrator_new_id': new_id}}, supportsAllDrives=True, fields="id"))
+                self.src_user.wrapper(self.src_user.drive_service.files().update, fileId=folder.id, body={'properties': {'migrator_new_id': new_id}}, fields="id")
             except MigratorError as e:
                 logger.error(f"Failed to mark folder {folder.name} as migrated in source drive: {e}")
                 # not a critical error, continue with migration
@@ -322,9 +348,6 @@ class SingleMigrator:
         def move_file(file: File, parent_id=None):
             drive.num_migrated_files += 1
             # old drive has been shared to new user, use new user to copy file to new drive, preserving as much metadata and properties as possible
-            if file.is_invalid:
-                logger.debug(f"Skipping file {file.name} with unsupported mime type {file.mime_type}")
-                return
             new_metadata = {
                 'name': file.name,
                 'mimeType': file.mime_type,
@@ -334,7 +357,7 @@ class SingleMigrator:
                 }
             }
             try:
-                resp = self.dst_user.wrapper(self.dst_user.drive_service.files().copy(fileId=file.id, body=new_metadata, supportsAllDrives=True, fields="id"), retries=5)
+                resp = self.dst_user.wrapper(self.dst_user.drive_service.files().copy, fileId=file.id, body=new_metadata, fields="id", retries=5)
                 new_id = resp.get('id', None)
                 if not new_id:
                     logger.error(f"Failed to copy file {file.name} to drive {new_drive.name}")
@@ -346,7 +369,7 @@ class SingleMigrator:
                 return
             # mark old file as migrated by adding property with new file id
             try:
-                self.src_user.wrapper(self.src_user.drive_service.files().update(fileId=file.id, body={'properties': {'migrator_new_id': new_id}}, supportsAllDrives=True, fields="id"))
+                self.src_user.wrapper(self.src_user.drive_service.files().update, fileId=file.id, body={'properties': {'migrator_new_id': new_id}}, fields="id")
             except MigratorError as e:
                 logger.error(f"Failed to mark file {file.name} as migrated in source drive: {e}")
                 # not a critical error, continue with migration
@@ -363,21 +386,41 @@ class SingleMigrator:
             logger.error(f"Failed to remove share from source drive {drive.name}: {e}")
             # not a critical error, continue with migration
         drive.status_message = "Completed"
-        # append "-migrated" to old drive name
-        try:
-            self.src_user.wrapper(self.src_user.drive_service.drives().update(driveId=drive.id, body={'name': drive.name + "-migrated"}, fields="id"), retries=5)
-        except MigratorError as e:
-            logger.error(f"Failed to rename source drive {drive.name}: {e}")
-            # not a critical error, continue with migration
+        # append "-migrated" to old drive name (only once!)
+        if not drive.migrated:
+            try:
+                self.src_user.wrapper(self.src_user.drive_service.drives().update, driveId=drive.id, body={'name': drive.name + "-migrated"}, fields="id", retries=5)
+            except MigratorError as e:
+                logger.error(f"Failed to rename source drive {drive.name}: {e}")
+            drive.migrated = True
 
     def _migrate_personal_drive(self):
-        raise NotImplementedError("Personal drive migration not implemented yet!")
-        def strategy_a():
-            # share all files and folders in personal drive with new user, then have new user copy them to new drive
-            pass
-        def strategy_b():
-            # google takout style approach: download all files and folders in personal drive, then reupload them to new drive with new user credentials
-            pass
+        # create new "Migrated" folder in root of new drive to hold migrated personal drive files
+        try:
+            resp = self.dst_user.wrapper(self.dst_user.drive_service.files().create,
+                body={
+                    'name': 'Migrated Personal Drive',
+                    'mimeType': 'application/vnd.google-apps.folder',
+                    'properties': {
+                        'migrator_personal_drive': 'true'
+                    }
+                }, fields="id", retries=5)
+            new_root_id = resp.get('id', None)
+            if not new_root_id:
+                raise UnknownAPIError(f"Failed to create root folder for personal drive migration in destination account. Got response: {resp}")
+        except MigratorError as e:
+            logger.error(f"Failed to create root folder for personal drive migration in destination account: {e}")
+            raise e
+        path_map = {self.src_user.personal_drive.id: new_root_id}
+        # build folder structure in new drive by creating folders with same name and properties as old folders
+        
+
+        # def strategy_a():
+        #     # share all files and folders in personal drive with new user, then have new user copy them to new drive
+        #     pass
+        # def strategy_b():
+        #     # google takout style approach: download all files and folders in personal drive, then reupload them to new drive with new user credentials
+        #     pass
 
     def perform_migration(self):
         for d in self.to_migrate:
@@ -411,7 +454,7 @@ class SingleMigrator:
         # index files in all drives to be migrated
         for drive in self.to_migrate:
             logger.info(f"Indexing files in drive {drive}...")
-            self.src_user.index_drive_files(drive)
+            self.src_user.index_shared_drive_files(drive)
             logger.info(f"Found {drive.num_files} files in drive {drive}")
 
     def generate_drive_list(self):
@@ -421,7 +464,7 @@ class SingleMigrator:
         for d in src_drives:
             for dd in dst_drives:
                 if d.name == dd.name:
-                    d.add_successor(dd)
+                    d.add_potential_successor(dd)
         return src_drives
 
 
@@ -459,7 +502,7 @@ class Org:
             logger.error("Attempted to search for user without user service instance!")
             raise ValueError("User service not configured!")
 
-        query_ret = self.wrapper(self.user_service.users().list(customer='my_customer', pageToken=page_token))
+        query_ret = self.wrapper(self.user_service.users().list, customer='my_customer', pageToken=page_token)
 
         # filter out just the full name of each user and return as list
         users: list = []
@@ -475,7 +518,7 @@ class Org:
 
     def find_user(self, name) -> User:
 
-        query_ret = self.wrapper(self.user_service.users().list(customer='my_customer', query=f'name:"{name}"'))
+        query_ret = self.wrapper(self.user_service.users().list, customer='my_customer', query=f'name:"{name}"')
 
         if 'users' not in query_ret or len(query_ret['users']) == 0:
             logger.warning(f"No users found matching name: {name}")
@@ -487,7 +530,7 @@ class Org:
 
     def find_user_by_email(self, email) -> User:
 
-        query_ret = self.wrapper(self.user_service.users().list(customer='my_customer', query=f'email:"{email}"'))
+        query_ret = self.wrapper(self.user_service.users().list, customer='my_customer', query=f'email:"{email}"')
 
         if 'users' not in query_ret or len(query_ret['users']) == 0:
             logger.warning(f"No users found matching email: {email}")
