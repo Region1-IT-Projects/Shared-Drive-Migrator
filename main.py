@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import uuid
@@ -15,7 +16,6 @@ from backend import (
     SingleMigrator,
     User,
 )
-import pdb
 
 load_dotenv()
 
@@ -281,7 +281,6 @@ class Session:
         try:
             drive_list: list[SharedDrive] = await run.io_bound(self.migrator_obj.src_user.get_drives)
         except Exception as e:
-            pdb.post_mortem()
             logging.error(f"Failed to fetch drive list: {e}")
             ui.notify("Failed to fetch drives. Check logs for details.", type='negative')
             container.clear()
@@ -343,7 +342,6 @@ class Session:
                 personal = migrate_personal_switch.value if migrate_personal_switch is not None else True
                 self.migrator_obj.init_migration(selected, personal)
                 logging.debug(f"Selected drives: {[getattr(d, 'id', str(d)) for d in selected]}")
-                ui.notify(f"Migration started for {len(selected)} drives")
                 self.go_to(Stage.SINGLE_PROGRESS)
 
             ui.button("Continue", on_click=handle_continue).props('elevated')
@@ -351,10 +349,63 @@ class Session:
     async def render_single_progress(self):
         container = ui.column().classes('w-full items-center gap-8 p-8')
         with container:
-            ui.label("Migration in Progress").classes('text-h4 font-light')
-            ui.label("Migrating shared drives...").classes('text-grey')
+            ui.label("Initializing Migration").classes('text-h4 font-light')
+            ui.label("Indexing drives ... (this may take a while)").classes('text-grey')
             ui.spinner(size='lg')
-        # TODO implement actual progress tracking and update this view accordingly
+            await run.io_bound(self.migrator_obj.prepare_migration)
+            logging.debug("Migration preparation complete, rendering progress view")
+            container.clear()
+
+            # start the migration in background
+            try:
+                migration_task = asyncio.create_task(run.io_bound(self.migrator_obj.perform_migration))
+            except Exception:
+                migration_task = None
+
+            ui.label("Migration Progress").classes('text-h4 font-light')
+
+            @ui.refreshable
+            def render_progress():
+                if not self.migrator_obj:
+                    ui.label("No migration configured").classes('text-grey')
+                    return
+                drives = self.migrator_obj.poll_progress()
+                if not drives:
+                    ui.label("No drives to show").classes('text-grey')
+                    return
+                with ui.column().classes('w-full gap-4'):
+                    for d in drives:
+                        name = d.get('name', 'Unknown')
+                        num = d.get('num_files', 0) or 0
+                        migrated = d.get('num_migrated_files', 0) or 0
+                        status = d.get('status_message', '')
+                        failed = d.get('failed_files', []) or []
+
+                        with ui.card().classes('w-full p-4'), ui.row().classes('w-full items-center justify-between'):
+                            with ui.column().classes('items-start'):
+                                ui.label(name).classes('text-md font-medium')
+                                ui.label(status).classes('text-xs text-grey-500')
+                                if failed:
+                                    ui.label(str(d.get('failed_files', []))).classes('text-xs text-red-500')
+                            # progress column
+                            pct = (migrated / num) if num > 0 else (1.0 if status.lower().startswith('completed') else 0.0)
+                            with ui.column().classes('items-end w-56'):
+                                ui.label(f"{migrated} / {num}").classes('text-sm')
+                                ui.progress(pct)
+
+        # refresh progress every 2 seconds while migration is running
+        def _tick():
+            render_progress.refresh()
+            # if task finished, do one last refresh and stop timer by returning False
+            try:
+                if migration_task and migration_task.done():
+                    render_progress.refresh()
+                    return False
+            except Exception:
+                return True
+            return True
+
+        ui.timer(2.0, _tick)
 
 # ----- Auth Specific Helpers ------
 
