@@ -51,6 +51,9 @@ class MissingAdminSDKError(MigratorError):
     def __init__(self, helptext):
         super().__init__(helptext)
 
+class ObjectNotFoundError(MigratorError):
+    pass
+
 class APIWrapper:
     def __init__(self):
         self.total_requests = 0
@@ -59,7 +62,7 @@ class APIWrapper:
         self.cur_backoff = 0.01
 
     def __str__(self):
-        return f"Requests: {self.total_requests} ({self.requests_since_error} since last error), Errors:{self.total_errors}, Backoff: {self.cur_backoff:.2f}s"
+        return f"Requests: {self.total_requests} ({self.requests_since_error} since last error), Errors: {self.total_errors}, Backoff: {self.cur_backoff:.2f}s"
 
     def __call__(self, method, retries = 1, retryable_errors = (RateLimitError, GoogleIncompetenceError), **kwargs):
         try:
@@ -73,8 +76,6 @@ class APIWrapper:
             else:
                 logger.error(f"Max retries exceeded for method {method}, giving up.")
                 raise e
-        except Exception:
-            pdb.post_mortem()
 
     def run(self, method, **kwargs):
         self.total_requests += 1
@@ -101,6 +102,9 @@ class APIWrapper:
                     logger.warning("Google flagged request as abusive content")
                     raise AbusiveContentError() from e
                 raise PermissionError() from e
+            elif e.resp.status == 404:
+                logger.warning(f"Object not found: {e.error_details}")
+                raise ObjectNotFoundError() from e
             logger.error(f"Unknown API Error {e.resp.status} - {e.error_details}")
             raise UnknownAPIError(e) from e
         except SSLError as e:
@@ -128,6 +132,7 @@ class File:
         self.is_folder = self.mime_type == 'application/vnd.google-apps.folder'
         self.is_invalid = self.mime_type in uncopyable_mime_types
         self.trashed = infodict.get('trashed', False)
+        self.migrated = infodict.get('properties', {}).get('migrator_new_id', None) is not None
         self.permissions = infodict.get('permissions', [])
         parentlist = infodict.get('parents', [])
         self.parent_id = parentlist[0] if len(parentlist) == 1 else None
@@ -145,6 +150,7 @@ class Drive:
         self.status_message = "Not started"
         self.root: list[File] = []
         self.all_files: dict[str, File] = {}
+        self.failed_files: list[File] = []
         self.initialized = False
 
     def __str__(self):
@@ -159,11 +165,14 @@ class Drive:
             'failed_files': [f.name for f in self.failed_files]
         }
 
-    def build_filetree(self, files: list[dict]):
+    def build_filetree(self, files: list[dict], skip_migrated = False): #TODO switch to true when done testing, add option in UI
         for f in files:
             newf = File(f)
             if newf.trashed or newf.is_invalid:
                 logger.debug(f"Skipping file {newf.name} (id: {newf.id}) in drive {self.name} because it is {'trashed' if newf.trashed else 'invalid MIME type'}")
+                continue
+            if skip_migrated and newf.migrated:
+                logger.debug(f"Skipping file {newf.name} (id: {newf.id}) in drive {self.name} because it has already been migrated")
                 continue
             self.all_files[f['id']] = newf
         self.num_files = len(self.all_files)
@@ -190,8 +199,6 @@ class SharedDrive(Drive):
         self.possible_successors.append(drive)
 
     def set_successor(self, drive: SharedDrive):
-        if drive not in self.possible_successors:
-            logger.warning(f"Setting successor to drive {drive} which was not identified as a possible successor for drive {self}")
         self.successor = drive
 
 
@@ -279,8 +286,8 @@ class User:
         return new_drive
 
     def _fetch_files(self, token: str | None = None, **kwargs) -> list[dict]:
-        query_ret: dict = self.wrapper(self.drive_service.files().list,  supportsAllDrives=True, includeItemsFromAllDrives=True,
-                                      pageToken=token, retries=5, 
+        query_ret: dict = self.wrapper(self.drive_service.files().list,
+                                      pageToken=token, retries=5,
                                       fields="nextPageToken, files(id, name, kind, mimeType, parents, owners, trashed, properties)",
                                       **kwargs)
         if query_ret is None:
@@ -297,7 +304,7 @@ class User:
         return file_list
 
     def index_shared_drive_files(self, drive: SharedDrive):
-        file_list = self._fetch_files(driveId=drive.id, corpora="drive", q="trashed=false")
+        file_list = self._fetch_files(driveId=drive.id, corpora="drive", q="trashed=false", supportsAllDrives=True, includeItemsFromAllDrives=True)
         drive.build_filetree(file_list)
 
     def index_personal_drive_files(self):
@@ -315,7 +322,12 @@ class SingleMigrator:
         self.migrate_personal_drive = False
         self.dowload_file_size_limit_mb = 0 #default to not allowing any downloads
         self.download_location = None
+        self.initialized = False #also serve as abort flag
+        self.index_progress = 0
+
+    def abort(self):
         self.initialized = False
+        logger.info("Abort flag set, migration will stop after current file is finished.")
 
     def _migrate_shared_drive(self, drive: SharedDrive):
         # share old drive with new user
@@ -334,6 +346,8 @@ class SingleMigrator:
         id_map = {}
 
         def move_folder(folder: File, parent_id=None):
+            if not self.initialized:
+                return
             drive.num_migrated_files += 1
             # create folder in new drive with same name and properties as old folder
             new_file = {
@@ -363,6 +377,9 @@ class SingleMigrator:
                     move_file(child, parent_id=new_id)
             logger.debug(f"Finished moving folder {folder.name} in drive {new_drive.name}")
         def move_file(file: File, parent_id=None):
+            if not self.initialized:
+                return
+            logger.debug(f"Moving file {file.name} in drive {new_drive.name}...")
             drive.num_migrated_files += 1
             # old drive has been shared to new user, use new user to copy file to new drive, preserving as much metadata and properties as possible
             new_metadata = {
@@ -386,27 +403,28 @@ class SingleMigrator:
                 return
             # mark old file as migrated by adding property with new file id
             try:
-                self.src_user.wrapper(self.src_user.drive_service.files().update, supportsAllDrives=True, fileId=file.id, body={'properties': {'migrator_new_id': new_id}}, fields="id")
+                self.src_user.wrapper(self.src_user.drive_service.files().update, supportsAllDrives=True, fileId=file.id, body={'properties': {'migrator_new_id': new_id}})
             except MigratorError as e:
                 logger.error(f"Failed to mark file {file.name} as migrated in source drive: {e}")
                 # not a critical error, continue with migration
 
+        logger.debug("Dropping into file move loop")
         for f in drive.root:
             if f.is_folder:
                 move_folder(f, parent_id=new_drive.id)
             else:
                 move_file(f, parent_id=new_drive.id)
         # remove share from old drive
+        logger.debug(f"Removing share from source drive {drive.name}...")
         try:
             self.src_user.remove_share(drive.id, permission_id)
         except MigratorError as e:
             logger.error(f"Failed to remove share from source drive {drive.name}: {e}")
             # not a critical error, continue with migration
         drive.status_message = "Completed"
-        # append "-migrated" to old drive name (only once!)
         if not drive.migrated:
             try:
-                self.src_user.wrapper(self.src_user.drive_service.drives().update, supportsAllDrives=True, driveId=drive.id, body={'name': drive.name + "-migrated"}, fields="id", retries=5)
+                self.src_user.wrapper(self.src_user.drive_service.drives().update, driveId=drive.id, body={'name': drive.name + " - Migrated"}, retries=5)
             except MigratorError as e:
                 logger.error(f"Failed to rename source drive {drive.name}: {e}")
             drive.migrated = True
@@ -531,6 +549,11 @@ class SingleMigrator:
 
 
         for f in self.src_user.personal_drive.all_files.values():
+            if not self.initialized:
+                return
+            if not isinstance(f, File):
+                logger.warning(f"Encountered non-File object in personal drive files: {f}, skipping")
+                continue
             if f.is_folder:
                 continue
             if not (new_id := strategy_a(f)):
@@ -559,6 +582,9 @@ class SingleMigrator:
         is_ok = True
         logger.debug(f"Starting migration of {len(self.to_migrate)} drives")
         for d in self.to_migrate:
+            if not self.initialized:
+                logger.info("Migration aborted, stopping migration loop.")
+                return False
             logger.info(f"Starting migration of drive {d}...")
             try:
                 self._migrate_shared_drive(d)
@@ -571,9 +597,9 @@ class SingleMigrator:
             logger.info("Starting migration of personal drive...")
             self._migrate_personal_drive()
             logger.info("Finished migration of personal drive.")
-        return is_ok
+        return is_ok and self.initialized # if abort, we arent ok
 
-    def set_migration_options(self, download_file_size_limit_mb: int, download_location: str):
+    def set_migration_options(self, download_file_size_limit_mb: int, download_location: str): #TODO options setter in UI
         self.dowload_file_size_limit_mb = download_file_size_limit_mb
         self.download_location = download_location
 
@@ -585,7 +611,6 @@ class SingleMigrator:
 
     def poll_progress(self) -> list[dict]:
         # return list of dicts with progress info for each drive being migrated
-        # TODO include personal drive progress once implemented
         progress = [d.gen_status_dict() for d in self.to_migrate]
         if self.migrate_personal_drive:
             try:
@@ -594,20 +619,22 @@ class SingleMigrator:
             except Exception:
                 # if personal drive not available yet, skip
                 pass
-        logger.deubug(f"Polled migration progress: {progress}")
         return progress
 
-    def prepare_migration(self):
+    def prepare_shared_migration(self):
         # index files in all drives to be migrated
-        for drive in self.to_migrate:
+        for i, drive in enumerate(self.to_migrate):
             logger.info(f"Indexing files in drive {drive}...")
+            self.index_progress = round(i+1 / len(self.to_migrate) * 100, 1)
             self.src_user.index_shared_drive_files(drive)
             logger.info(f"Found {drive.num_files} files in drive {drive}")
+        logger.info("Finished indexing files for migration")
+
+    def prepare_personal_migration(self):
         if self.migrate_personal_drive:
             logger.info("Indexing files in personal drive...")
             self.src_user.index_personal_drive_files()
             logger.info(f"Found {self.src_user.personal_drive.num_files} files in personal drive")
-        logger.info("Finished indexing files for migration")
 
     def generate_drive_list(self):
         # generate list of drives, identify duplicate names across source and destination accounts and mark for user confirmation

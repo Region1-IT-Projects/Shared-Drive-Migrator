@@ -9,6 +9,7 @@ dependencies = [
     "google-auth-httplib2>=0.3.0",
     "google-auth-oauthlib>=1.2.4",
     "nicegui>=3.6.1",
+    "pywebview>=6.1",
 ]
 [tool.ruff]
 # The "Happy Medium" selection

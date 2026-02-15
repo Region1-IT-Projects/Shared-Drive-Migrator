@@ -40,8 +40,9 @@ class Stage(Enum):
         SINGLE_SETUP_ACCT = 2
         SINGLE_SETUP_DRIVES = 3
         SINGLE_PROGRESS = 4
-        BATCH_SETUP = 5
-        BATCH_PROGRESS = 6
+        SINGLE_FINISHED = 5
+        BATCH_SETUP = 6
+        BATCH_PROGRESS = 7
 
 class Session:
 
@@ -347,65 +348,109 @@ class Session:
             ui.button("Continue", on_click=handle_continue).props('elevated')
 
     async def render_single_progress(self):
-        container = ui.column().classes('w-full items-center gap-8 p-8')
+        container = ui.column().classes('w-full items-center gap-6 p-8')
         with container:
             ui.label("Initializing Migration").classes('text-h4 font-light')
-            ui.label("Indexing drives ... (this may take a while)").classes('text-grey')
-            ui.spinner(size='lg')
-            await run.io_bound(self.migrator_obj.prepare_migration)
-            logging.debug("Migration preparation complete, rendering progress view")
+            ui.linear_progress(value=None).classes('w-64 h-2')
+            ui.label("Indexing personal drive... This may take a while.").classes('text-grey italic')
+            idx_task = asyncio.create_task(run.io_bound(self.migrator_obj.prepare_personal_migration))
+            while not idx_task.done():
+                await asyncio.sleep(0.5)
+            await idx_task
+            container.clear()
+        with container:
+            ui.label("Initializing Migration").classes('text-h4 font-light')
+            # Progress bar for indexing
+            idx_progress_bar = ui.linear_progress(value=0, show_value=False).classes('w-64 h-2')
+            ui.label("Indexing shared drives... This may take a while.").classes('text-grey italic')
+            idx_task = asyncio.create_task(run.io_bound(self.migrator_obj.prepare_shared_migration))
+            while not idx_task.done():
+                val = getattr(self.migrator_obj, 'index_progress', 0) / 100.0
+                idx_progress_bar.set_value(val)
+                await asyncio.sleep(0.2)
+            await idx_task
             container.clear()
 
-            # start the migration in background
+        # Failed Files Dialog Setup
+        with ui.dialog() as error_dialog, ui.card().classes('w-[500px]'):
+            ui.label('Failed Files').classes('text-lg font-bold')
+            with ui.scroll_area().classes('h-64 border p-2 w-full'):
+                error_list_container = ui.column().classes('gap-1')
+            ui.button('Close', on_click=error_dialog.close).classes('self-end')
+
+        def show_errors(files):
+            error_list_container.clear()
+            with error_list_container:
+                for f in files:
+                    ui.label(str(f)).classes('text-xs text-red-700 font-mono')
+            error_dialog.open()
+        migration_task = asyncio.create_task(run.io_bound(self.migrator_obj.perform_migration))
+
+        async def cancel_migration():
+            self.migrator_obj.abort()
+            migration_task.cancel()
+            ui.notify('Migration Cancelled', type='warning')
+            # Clean up UI or redirect
+            prog_timer.deactivate()
+            container.clear()
+            with container:
+                ui.label("Migration Stopped").classes('text-h4 text-red')
+                ui.button("Start Over", on_click=lambda: self.go_to(Stage.MODE_SELECT)).props('elevated color=red-500').classes('mt-4')
+
+        @ui.refreshable
+        def render_progress():
             try:
-                migration_task = asyncio.create_task(run.io_bound(self.migrator_obj.perform_migration))
-            except Exception:
-                migration_task = None
+                drives = self.migrator_obj.poll_progress() or []
+            except Exception as e:
+                ui.label(f"Connection Error: {e}").classes('text-red')
+                return
 
-            ui.label("Migration Progress").classes('text-h4 font-light')
+            with ui.column().classes('w-full max-w-4xl gap-4'):
+                for d in drives:
+                    name = d.get('name', 'Unknown')
+                    total = d.get('num_files', 0)
+                    migrated = d.get('num_migrated_files', 0)
+                    status = d.get('status_message', '')
+                    failed = d.get('failed_files', [])
+                    pct = (migrated / total) if total > 0 else (1.0 if status.lower().startswith('comp') else 0.0)
+                    with ui.card().classes('w-full p-6 shadow-sm'), ui.row().classes('w-full items-center justify-between no-wrap'):
+                        # Drive Info
+                        with ui.column().classes('flex-grow'):
+                            ui.label(name).classes('text-lg font-medium')
+                            ui.label(status).classes('text-xs text-grey-500')
+                            if failed:
+                                ui.button(f'View {len(failed)} Failures',
+                                        on_click=lambda f=failed: show_errors(f),
+                                        icon='report_problem').props('flat color=red size=sm')
 
-            @ui.refreshable
-            def render_progress():
-                if not self.migrator_obj:
-                    ui.label("No migration configured").classes('text-grey')
-                    return
-                drives = self.migrator_obj.poll_progress()
-                if not drives:
-                    ui.label("No drives to show").classes('text-grey')
-                    return
-                with ui.column().classes('w-full gap-4'):
-                    for d in drives:
-                        name = d.get('name', 'Unknown')
-                        num = d.get('num_files', 0) or 0
-                        migrated = d.get('num_migrated_files', 0) or 0
-                        status = d.get('status_message', '')
-                        failed = d.get('failed_files', []) or []
+                        # Progress Stats
+                        with ui.column().classes('items-end w-48'):
+                            ui.label(f"{migrated:,} / {total:,}").classes('text-sm font-mono')
+                            ui.linear_progress(value=pct, show_value=False).classes('w-full h-1.5')
+                            ui.label(f"{pct:.0%}").classes('text-xs text-primary font-bold')
 
-                        with ui.card().classes('w-full p-4'), ui.row().classes('w-full items-center justify-between'):
-                            with ui.column().classes('items-start'):
-                                ui.label(name).classes('text-md font-medium')
-                                ui.label(status).classes('text-xs text-grey-500')
-                                if failed:
-                                    ui.label(str(d.get('failed_files', []))).classes('text-xs text-red-500')
-                            # progress column
-                            pct = (migrated / num) if num > 0 else (1.0 if status.lower().startswith('completed') else 0.0)
-                            with ui.column().classes('items-end w-56'):
-                                ui.label(f"{migrated} / {num}").classes('text-sm')
-                                ui.progress(pct)
+        with container:
+            with ui.row().classes('w-full justify-between items-center mb-4'):
+                ui.label("Active Migration").classes('text-h4 font-light')
+                ui.button("Cancel Migration", on_click=cancel_migration, icon='stop').props('outline color=red')
+            render_progress()
 
-        # refresh progress every 2 seconds while migration is running
         def _tick():
             render_progress.refresh()
-            # if task finished, do one last refresh and stop timer by returning False
-            try:
-                if migration_task and migration_task.done():
-                    render_progress.refresh()
-                    return False
-            except Exception:
-                return True
-            return True
+            if migration_task.done():
+                prog_timer.deactivate()
+                ui.notify("Migration Task Finished")
 
-        ui.timer(2.0, _tick)
+        prog_timer = ui.timer(2.0, _tick)
+
+    async def render_single_finished(self):
+        # TODO bring in summary stats from migrator object to show here
+        container = ui.column().classes('w-full items-center gap-6 p-8')
+        with container:
+            ui.label("Migration Complete").classes('text-h4 font-light text-green-600')
+            ui.icon('check_circle', size='64px', color='green-500')
+            ui.label("All selected drives have been migrated successfully!").classes('text-green-700')
+            ui.button("Start New Migration", on_click=lambda: self.go_to(Stage.MODE_SELECT)).props('elevated color=green-500').classes('mt-4')
 
 # ----- Auth Specific Helpers ------
 
@@ -483,4 +528,4 @@ class Session:
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    ui.run(storage_secret="supersecret")
+    ui.run(storage_secret="supersecret", reload=False, native=False, favicon="favicon.ico")
