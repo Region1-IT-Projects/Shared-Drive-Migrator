@@ -3,18 +3,25 @@ from __future__ import annotations
 import logging
 import time
 from ssl import SSLError
-
+import io
 import googleapiclient.discovery as g_discover
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 import googleapiclient.errors as g_api_errors
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 import asyncio
 import uuid
-from __future__ import annotations
 
 logger = logging.getLogger(__name__)
 MAX_BACKOFF = 30
+mime_map = {
+    'application/vnd.google-apps.document': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.google-apps.spreadsheet': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.google-apps.presentation': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'application/vnd.google-apps.drawing': 'image/jpeg',
+    'application/vnd.google-apps.jam' : 'application/pdf'
+}
 
 class MigratorError(Exception):
     pass
@@ -50,7 +57,7 @@ class APIWrapper:
     def __str__(self):
         return f"Requests: {self.total_requests} ({self.requests_since_error} since last error), Errors:{self.total_errors}, Backoff: {self.cur_backoff:.2f}s"
 
-    def __call__(self, method, retries = 0, retryable_errors = (RateLimitError, GoogleIncompetenceError), **kwargs):
+    def __call__(self, method, retries = 1, retryable_errors = (RateLimitError, GoogleIncompetenceError), **kwargs):
         try:
             return self.run(method, **kwargs)
         except retryable_errors as e:
@@ -149,6 +156,7 @@ class Drive:
         }
 
     def build_filetree(self, files: list[dict]):
+        self.flat_file_list = files
         tempdict = {}
         for f in files:
             newf = File(f)
@@ -289,7 +297,7 @@ class User:
         drive.build_filetree(file_list)
 
     def index_personal_drive_files(self):
-        file_list = self.__fetch_files(corpora="user", q="trashed=false", supportsAllDrives=False, includeItemsFromAllDrives=False)
+        file_list = self.__fetch_files(corpora="user", q="trashed=false", includeItemsFromAllDrives=False)
         self.personal_drive.build_filetree(file_list)
 
 
@@ -301,6 +309,8 @@ class SingleMigrator:
         self.dst_user = dst_user
         self.to_migrate: list[SharedDrive] = []
         self.migrate_personal_drive = False
+        self.dowload_file_size_limit_mb = 0 #default to not allowing any downloads
+        self.download_location = None
         self.initialized = False
 
     def _migrate_shared_drive(self, drive: SharedDrive):
@@ -413,16 +423,119 @@ class SingleMigrator:
             raise e
         path_map = {self.src_user.personal_drive.id: new_root_id}
         # build folder structure in new drive by creating folders with same name and properties as old folders
-        
+        def move_folder(folder: File, parent_id):
+            new_file = {
+                'name': folder.name,
+                'mimeType': folder.mime_type,
+                'parents': [parent_id],
+                'properties': {
+                    'migrator_source_id': folder.id
+                }
+            }
+            try:
+                resp = self.dst_user.wrapper(self.dst_user.drive_service.files().create, body=new_file, fields="id", retries=5)
+                new_id = resp.get('id', None)
+                if not new_id:
+                    logger.error(f"Failed to create folder {folder.name} in personal drive migration")
+                    raise UnknownAPIError(f"Failed to create folder {folder.name} in personal drive migration. Got response: {resp}")
+                path_map[folder.id] = new_id
+            except MigratorError as e:
+                logger.error(f"Failed to create folder {folder.name} in personal drive migration: {e}")
+                raise e
+            for child in folder.children:
+                if child.is_folder:
+                    move_folder(child, parent_id=new_id)
+        for f in self.src_user.personal_drive.root:
+            if f.is_folder:
+                move_folder(f, parent_id=new_root_id)
+        logger.info("Finished creating folder structure for personal drive migration, now copying files...")
 
-        # def strategy_a():
-        #     # share all files and folders in personal drive with new user, then have new user copy them to new drive
-        #     pass
-        # def strategy_b():
-        #     # google takout style approach: download all files and folders in personal drive, then reupload them to new drive with new user credentials
-        #     pass
+        def strategy_a(to_move: File) -> bool:
+            # share file in personal drive with new user, then have new user copy them to new drive
+            self.src_user.share_object(to_move.id, self.dst_user.address, role='writer')
+            new_parent = path_map.get(to_move.parent_id, new_root_id)
+            try:
+                new_id = self.dst_user.wrapper(self.dst_user.drive_service.files().copy, fileId=to_move.id, body={
+                    'name': to_move.name,
+                    'mimeType': to_move.mime_type,
+                    'parents': [new_parent],
+                    'properties': {
+                        'migrator_source_id': to_move.id
+                    }
+                }, fields="id", retries=5)
+            except MigratorError as e:
+                logger.warning(f"Failed to copy file {to_move.name} in personal drive migration with strategy A: {e}")
+                return False
+            return new_id.get('id', None)
 
-    def perform_migration(self):
+        def strategy_b(to_move: File) -> bool:
+            # google takout style approach: download all files and folders in personal drive, then reupload them to new drive with new user credentials
+            if self.dowload_file_size_limit_mb > 0 and to_move.mime_type != 'application/vnd.google-apps.folder':
+                # check file size before downloading
+                try:
+                    metadata = self.src_user.wrapper(self.src_user.drive_service.files().get, fileId=to_move.id, fields="size")
+                    size = int(metadata.get('size', 0))
+                except MigratorError as e:
+                    logger.warning(f"Failed to get size for file {to_move.name} in personal drive migration: {e}")
+                    return False
+            if size > self.dowload_file_size_limit_mb * 1024 * 1024:
+                        logger.warning(f"Skipping file {to_move.name} in personal drive migration because it exceeds the download size limit")
+                        return False
+            # download file content
+            if to_move.mime_type in mime_map:
+                request = self.src_user.drive_service.files().export_media(fileId=to_move.id, mimeType=mime_map[to_move.mime_type])
+            else:
+                request = self.src_user.drive_service.files().get_media(fileId=to_move.id)
+            try:
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+                logger.debug(f"Downloaded file {to_move.name} in personal drive migration, now uploading...")
+            except Exception as e:
+                logger.warning(f"Failed to download file {to_move.name} in personal drive migration: {e}")
+                return False
+            fh.seek(0)
+            new_parent = path_map.get(to_move.parent_id, new_root_id)
+            try:
+                uploader = MediaIoBaseUpload(fh, mimetype=mime_map.get(to_move.mime_type, 'application/octet-stream'), resumable=True)
+                self.dst_user.wrapper(self.dst_user.drive_service.files().create, body={
+                    'name': to_move.name,
+                    'mimeType': to_move.mime_type,
+                    'parents': [new_parent],
+                    'properties': {
+                        'migrator_source_id': to_move.id
+                    }}, media_body=uploader, fields="id", retries=1)
+            except MigratorError as e:
+                logger.warning(f"Failed to upload file {to_move.name} in personal drive migration with strategy B: {e}")
+                return False
+            return True
+
+
+        for f in self.src_user.personal_drive.flat_file_list:
+            if f.is_folder:
+                continue
+            if f.trashed or f.is_invalid:
+                logger.debug(f"Skipping file {f.name} (id: {f.id}) in personal drive because it is {'trashed' if f.trashed else 'invalid'}")
+                continue
+            if not (new_id := strategy_a(f)):
+                logger.info(f"Strategy A failed for file {f.name} in personal drive, trying strategy B...")
+                if not (new_id := strategy_b(f)):
+                    logger.error(f"Failed to migrate file {f.name} in personal drive with both strategies, skipping")
+                    self.src_user.personal_drive.failed_files.append(f)
+                    continue
+            self.src_user.personal_drive.num_migrated_files += 1
+            # mark old file as migrated by adding property with new file id
+            try:
+                self.src_user.wrapper(self.src_user.drive_service.files().update, fileId=f.id, body={'properties': {'migrator_new_id': new_id}})
+            except MigratorError as e:
+                logger.error(f"Failed to mark file {f.name} as migrated in source drive with strategy A: {e}")
+                # not a critical error, continue with migration
+
+
+    def perform_migration(self) -> bool:
+        is_ok = True
         for d in self.to_migrate:
             logger.info(f"Starting migration of drive {d}...")
             try:
@@ -430,11 +543,17 @@ class SingleMigrator:
             except Exception as e:
                 logger.error(f"Migration of drive {d} failed with error: {e}")
                 d.status_message = f"Critical Error: {e}"
+                is_ok = False
             logger.info(f"Finished migration of drive {d}. {len(d.failed_files)} files failed to migrate.")
         if self.migrate_personal_drive:
             logger.info("Starting migration of personal drive...")
             self._migrate_personal_drive()
             logger.info("Finished migration of personal drive.")
+        return is_ok
+
+    def set_migration_options(self, download_file_size_limit_mb: int, download_location: str):
+        self.dowload_file_size_limit_mb = download_file_size_limit_mb
+        self.download_location = download_location
 
     def init_migration(self, drives: list[SharedDrive], migrate_personal_drive: bool):
         # Initialize migration object but don't actually start migration yet
