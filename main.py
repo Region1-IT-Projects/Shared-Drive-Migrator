@@ -1,12 +1,12 @@
-import asyncio
 import logging
 import os
 import uuid
+from datetime import timedelta
 from enum import Enum
 
 from dotenv import load_dotenv
-from nicegui import events, run, ui
-from datetime import timedelta
+from nicegui import events, ui
+
 from backend import (
     APIWrapper,
     MigratorError,
@@ -71,6 +71,8 @@ class Session:
                 await self.render_single_drive_select()
             case Stage.SINGLE_PROGRESS:
                 await self.render_single_progress()
+            case Stage.SINGLE_FINISHED:
+                await self.render_single_finished()
             case _:
                 ui.label("This stage is not implemented yet!").classes('text-red-500')
 
@@ -83,15 +85,14 @@ class Session:
                 self.stage = Stage.AUTH_SETUP
             case Stage.MODE_SELECT:
                 if not self.__is_auth_configured():
-                    # TODO: make this notify more errory
-                    ui.notify("You must configure both source and destination keys before proceeding!")
+                    ui.notify("You must configure both source and destination keys before proceeding!", type='negative')
                 else:
                     self.stage = Stage.MODE_SELECT
             case _:
                 self.stage = stage
         logging.debug(f"App stage is now {self.stage.name}")
         self.router.refresh()
-        self.render_footer.refresh() #TODO move to api limiter func
+        self.render_footer.refresh()
 
     def render_header(self):
         # 'elevated' adds a shadow, 'bordered' adds a bottom line
@@ -186,7 +187,7 @@ class Session:
 
         @ui.refreshable
         def render_account_card(title: str, key: str):
-            with ui.card().classes('w-80 p-4').style('min-height: 180px;'):
+            with ui.card().classes('w-80 p-4').style('min-height: 180px;') as card:
                 ui.label(title).classes('text-sm text-grey-600 dark:text-grey-400')
                 acct = state[key]
                 if isinstance(acct, User):
@@ -206,20 +207,23 @@ class Session:
                     # MANUAL STATE: Lookup failed
                     email_input = ui.input(label="Account Email", placeholder="user@example.com").classes('w-full')
 
-                    def handle_manual_set():
+                    async def handle_manual_set():
+                        card.clear()
+                        with ui.column().classes('grow w-full items-center justify-center gap-3'):
+                            ui.spinner(size='lg')
                         if email_input.value:
                             # Create the User object manually
                             if key == 'src':
-                                new_user = self.src_org.find_user_by_email(email_input.value.strip())
+                                new_user = await self.src_org.find_user_by_email(email_input.value.strip())
                             else:
-                                new_user = self.dst_org.find_user_by_email(email_input.value.strip())
-                            if new_user is None:
+                                new_user = await self.dst_org.find_user_by_email(email_input.value.strip())
+                            if not new_user:
                                 ui.notify("No user found with that email! Check the address and try again.", type='negative')
-                                return
-                            state[key] = new_user # Update the state dict
+                            else:
+                                state[key] = new_user # Update the state dict
                             # Refresh this card with the new User object
-
-                            render_account_card.refresh()
+                            card.clear()
+                            await render_account_card.refresh()
 
                     ui.button("Set Address", on_click=handle_manual_set).props('flat')
 
@@ -229,8 +233,8 @@ class Session:
             with account_row:
                 ui.spinner(size='md').classes('ml-2')
                 try:
-                    state['src'] = await run.io_bound(self.src_org.find_user, selected_user)
-                    state['dst'] = await run.io_bound(self.dst_org.find_user, selected_user)
+                    state['src'] = await self.src_org.find_user(selected_user)
+                    state['dst'] = await self.dst_org.find_user(selected_user)
                 except MissingAdminSDKError as e:
                     self.show_admin_sdk_error(e)
                     return
@@ -251,7 +255,7 @@ class Session:
             ui.spinner(size='lg')
             user_list = []
             try:
-                user_list = await run.io_bound(self.src_org.fetch_users)
+                user_list = await self.src_org.fetch_users()
             except MissingAdminSDKError as e:
                 self.show_admin_sdk_error(e)
                 return
@@ -280,7 +284,7 @@ class Session:
             ui.label("Loading drives...").classes('text-grey')
             ui.spinner(size='lg')
             try:
-                drive_list: list[SharedDrive] = await run.io_bound(self.migrator_obj.src_user.get_drives)
+                drive_list: list[SharedDrive] = await self.migrator_obj.src_user.get_drives()
             except Exception as e:
                 logging.error(f"Failed to fetch drive list: {e}")
                 ui.notify("Failed to fetch drives. Check logs for details.", type='negative')
@@ -351,24 +355,9 @@ class Session:
         container = ui.column().classes('w-full items-center gap-6 p-8')
         with container:
             ui.label("Initializing Migration").classes('text-h4 font-light')
-            ui.spinner()
-            ui.label("Indexing personal drive... This may take a while.").classes('text-grey italic')
-            idx_task = asyncio.create_task(run.io_bound(self.migrator_obj.prepare_personal_migration))
-            while not idx_task.done():
-                await asyncio.sleep(0.5)
-            await idx_task
-            container.clear()
-        with container:
-            ui.label("Initializing Migration").classes('text-h4 font-light')
-            # Progress bar for indexing
-            idx_progress_bar = ui.linear_progress(value=0, show_value=False).classes('w-64 h-2')
-            ui.label("Indexing shared drives... This may take a while.").classes('text-grey italic')
-            idx_task = asyncio.create_task(run.io_bound(self.migrator_obj.prepare_shared_migration))
-            while not idx_task.done():
-                val = getattr(self.migrator_obj, 'index_progress', 0) / 100.0
-                idx_progress_bar.set_value(val)
-                await asyncio.sleep(0.2)
-            await idx_task
+            ui.spinner(size='lg')
+            ui.label("Indexing drives... This may take a while.").classes('text-grey italic')
+            await self.migrator_obj.prepare_migration()
             container.clear()
 
         # Failed Files Dialog Setup
@@ -384,18 +373,15 @@ class Session:
                 for f in files:
                     ui.label(str(f)).classes('text-xs text-red-700 font-mono')
             error_dialog.open()
-        migration_task = asyncio.create_task(run.io_bound(self.migrator_obj.perform_migration))
 
         async def cancel_migration():
             self.migrator_obj.abort()
-            migration_task.cancel()
             ui.notify('Migration Cancelled', type='warning')
             # Clean up UI or redirect
             prog_timer.deactivate()
-            container.clear()
+            reset_btn.set_enabled(True)
             with container:
                 ui.label("Migration Stopped").classes('text-h4 text-red')
-                ui.button("Start Over", on_click=lambda: self.go_to(Stage.MODE_SELECT)).props('elevated color=red-500').classes('mt-4')
 
         @ui.refreshable
         def render_progress():
@@ -429,16 +415,18 @@ class Session:
         with container:
             ui.label("Active Migration").classes('text-h4 font-light')
             render_progress()
-            ui.button("Cancel Migration", on_click=cancel_migration, icon='stop').props('outline color=red')
+            with ui.row().classes('w-full justify-center'):
+                reset_btn = ui.button("Start Over", on_click=lambda: self.go_to(Stage.SINGLE_SETUP_DRIVES), icon='restart').props('outline color=blue-500').bind_enabled_from(self.migrator_obj, 'is_active', backward=lambda v: not v)
+                ui.button("Cancel Migration", on_click=cancel_migration, icon='stop').props('outline color=red')
 
         def _tick():
             render_progress.refresh()
-            if migration_task.done():
-                prog_timer.deactivate()
-                ui.notify("Migration Task Finished")
-                self.go_to(Stage.SINGLE_FINISHED)
 
-        prog_timer = ui.timer(2.0, _tick)
+        prog_timer = ui.timer(1.0, _tick)
+        res = await self.migrator_obj.perform_migration()
+        logging.debug(f"Migration completed with result: {res}")
+        ui.notify("Migration Process Complete!", type='success', timeout=5000)
+
 
     async def render_single_finished(self):
         # TODO bring in summary stats from migrator object to show here
