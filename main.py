@@ -6,7 +6,7 @@ from enum import Enum
 
 from dotenv import load_dotenv
 from nicegui import events, run, ui
-
+from datetime import timedelta
 from backend import (
     APIWrapper,
     MigratorError,
@@ -279,79 +279,79 @@ class Session:
         with container:
             ui.label("Loading drives...").classes('text-grey')
             ui.spinner(size='lg')
-        try:
-            drive_list: list[SharedDrive] = await run.io_bound(self.migrator_obj.src_user.get_drives)
-        except Exception as e:
-            logging.error(f"Failed to fetch drive list: {e}")
-            ui.notify("Failed to fetch drives. Check logs for details.", type='negative')
+            try:
+                drive_list: list[SharedDrive] = await run.io_bound(self.migrator_obj.src_user.get_drives)
+            except Exception as e:
+                logging.error(f"Failed to fetch drive list: {e}")
+                ui.notify("Failed to fetch drives. Check logs for details.", type='negative')
+                container.clear()
+                return
+
             container.clear()
-            return
+            ui.label("Select Drives to Migrate").classes('text-h4 font-light')
+            ui.label("Choose which shared drives to migrate for this user. Toggle drives to exclude them.").classes('text-grey')
+            switches: dict = {}
+            successors_selects: dict = {}
+            migrate_personal_switch = None
+            with ui.card().classes('w-full p-4').style('max-height: 50vh; overflow:auto'):
+                with ui.row().classes('w-full items-center justify-between'):
+                    with ui.column().classes('items-start'):
+                        ui.label("Personal Google Drive").classes('text-md font-medium text-orange-500')
+                    migrate_personal_switch = ui.switch(value=True).props('color=orange')
+                if not drive_list:
+                    ui.label("No shared drives found for this user.").classes('text-grey')
+                else:
+                    for drive in drive_list:
+                        if not isinstance(drive, SharedDrive):
+                            logging.error(f"Expected SharedDrive instance, got {type(drive)}. Skipping.")
+                            continue
+                        if drive.migrated:
+                            logging.info(f"Drive {drive} already migrated, skipping.")
+                            continue
+                        drive_name = str(drive)
+                        drive_id = drive.id
 
-        container.clear()
-        ui.label("Select Drives to Migrate").classes('text-h4 font-light')
-        ui.label("Choose which shared drives to migrate for this user. Toggle drives to exclude them.").classes('text-grey')
-        switches: dict = {}
-        successors_selects: dict = {}
-        migrate_personal_switch = None
-        with ui.card().classes('w-full p-4').style('max-height: 50vh; overflow:auto'):
-            with ui.row().classes('w-full items-center justify-between'):
-                with ui.column().classes('items-start'):
-                    ui.label("Personal Google Drive").classes('text-md font-medium text-orange-500')
-                migrate_personal_switch = ui.switch(value=True).props('color=orange')
-            if not drive_list:
-                ui.label("No shared drives found for this user.").classes('text-grey')
-            else:
-                for drive in drive_list:
-                    if not isinstance(drive, SharedDrive):
-                        logging.error(f"Expected SharedDrive instance, got {type(drive)}. Skipping.")
-                        continue
-                    if drive.migrated:
-                        logging.info(f"Drive {drive} already migrated, skipping.")
-                        continue
-                    drive_name = str(drive)
-                    drive_id = drive.id
+                        with ui.row().classes('w-full items-center justify-between'):
+                            with ui.column().classes('items-start'):
+                                ui.label(drive_name).classes('text-md font-medium')
+                                ui.label(str(drive_id)).classes('text-xs text-grey-500')
+                                # If this drive has possible successors, show a dropdown to pick one
+                                if drive.possible_successors:
+                                    options = [("Create a new drive", None)] + [ (f"{s.name} ({s.id})", s) for s in drive.possible_successors ]
+                                    successors_selects[drive_id] = ui.select(label='Migrate Into', options=options, value=None).classes('w-64').props('clearable')
+                            switches[drive_id] = ui.switch(value=True)
 
-                    with ui.row().classes('w-full items-center justify-between'):
-                        with ui.column().classes('items-start'):
-                            ui.label(drive_name).classes('text-md font-medium')
-                            ui.label(str(drive_id)).classes('text-xs text-grey-500')
-                            # If this drive has possible successors, show a dropdown to pick one
-                            if drive.possible_successors:
-                                options = [("Create a new drive", None)] + [ (f"{s.name} ({s.id})", s) for s in drive.possible_successors ]
-                                successors_selects[drive_id] = ui.select(label='Migrate Into', options=options, value=None).classes('w-64').props('clearable')
-                        switches[drive_id] = ui.switch(value=True)
+            # Buttons row
+            with ui.row().classes('w-full items-center justify-end gap-4'):
+                def handle_continue():
+                    selected = []
+                    for idx, drive in enumerate(drive_list):
+                        drive_id = getattr(drive, 'id', None) or f"drive-{idx}"
+                        sw = switches.get(drive_id)
+                        if sw and sw.value:
+                            selected.append(drive)
+                    # Apply any selected successors: if a successor was chosen, set it on the drive
+                    for d in selected:
+                        did = d.id
+                        sel = successors_selects.get(did)
+                        if sel is not None and sel.value is not None:
+                            try:
+                                d.set_successor(sel.value)
+                            except Exception as e:
+                                logging.error(f"Failed to set successor for drive {did}: {e}")
 
-        # Buttons row
-        with ui.row().classes('w-full items-center justify-end gap-4'):
-            def handle_continue():
-                selected = []
-                for idx, drive in enumerate(drive_list):
-                    drive_id = getattr(drive, 'id', None) or f"drive-{idx}"
-                    sw = switches.get(drive_id)
-                    if sw and sw.value:
-                        selected.append(drive)
-                # Apply any selected successors: if a successor was chosen, set it on the drive
-                for d in selected:
-                    did = d.id
-                    sel = successors_selects.get(did)
-                    if sel is not None and sel.value is not None:
-                        try:
-                            d.set_successor(sel.value)
-                        except Exception as e:
-                            logging.error(f"Failed to set successor for drive {did}: {e}")
+                    personal = migrate_personal_switch.value if migrate_personal_switch is not None else True
+                    self.migrator_obj.init_migration(selected, personal)
+                    logging.debug(f"Selected drives: {[getattr(d, 'id', str(d)) for d in selected]}")
+                    self.go_to(Stage.SINGLE_PROGRESS)
 
-                personal = migrate_personal_switch.value if migrate_personal_switch is not None else True
-                self.migrator_obj.init_migration(selected, personal)
-                logging.debug(f"Selected drives: {[getattr(d, 'id', str(d)) for d in selected]}")
-                self.go_to(Stage.SINGLE_PROGRESS)
-
-            ui.button("Continue", on_click=handle_continue).props('elevated')
+                ui.button("Continue", on_click=handle_continue).props('elevated')
 
     async def render_single_progress(self):
         container = ui.column().classes('w-full items-center gap-6 p-8')
         with container:
             ui.label("Initializing Migration").classes('text-h4 font-light')
-            ui.linear_progress(value=None).classes('w-64 h-2')
+            ui.spinner()
             ui.label("Indexing personal drive... This may take a while.").classes('text-grey italic')
             idx_task = asyncio.create_task(run.io_bound(self.migrator_obj.prepare_personal_migration))
             while not idx_task.done():
@@ -399,20 +399,16 @@ class Session:
 
         @ui.refreshable
         def render_progress():
-            try:
-                drives = self.migrator_obj.poll_progress() or []
-            except Exception as e:
-                ui.label(f"Connection Error: {e}").classes('text-red')
-                return
-
+            drive_progress = self.migrator_obj.poll_progress() or []
             with ui.column().classes('w-full max-w-4xl gap-4'):
-                for d in drives:
+                for d in drive_progress:
                     name = d.get('name', 'Unknown')
                     total = d.get('num_files', 0)
                     migrated = d.get('num_migrated_files', 0)
                     status = d.get('status_message', '')
                     failed = d.get('failed_files', [])
                     pct = (migrated / total) if total > 0 else (1.0 if status.lower().startswith('comp') else 0.0)
+                    time_s = round(d.get('time_remaining', 0))
                     with ui.card().classes('w-full p-6 shadow-sm'), ui.row().classes('w-full items-center justify-between no-wrap'):
                         # Drive Info
                         with ui.column().classes('flex-grow'):
@@ -427,19 +423,20 @@ class Session:
                         with ui.column().classes('items-end w-48'):
                             ui.label(f"{migrated:,} / {total:,}").classes('text-sm font-mono')
                             ui.linear_progress(value=pct, show_value=False).classes('w-full h-1.5')
-                            ui.label(f"{pct:.0%}").classes('text-xs text-primary font-bold')
+                            if time_s > 1:
+                                ui.label(f"About {str(timedelta(seconds=time_s))} Remaining").classes('text-xs text-grey-500')
 
         with container:
-            with ui.row().classes('w-full justify-between items-center mb-4'):
-                ui.label("Active Migration").classes('text-h4 font-light')
-                ui.button("Cancel Migration", on_click=cancel_migration, icon='stop').props('outline color=red')
+            ui.label("Active Migration").classes('text-h4 font-light')
             render_progress()
+            ui.button("Cancel Migration", on_click=cancel_migration, icon='stop').props('outline color=red')
 
         def _tick():
             render_progress.refresh()
             if migration_task.done():
                 prog_timer.deactivate()
                 ui.notify("Migration Task Finished")
+                self.go_to(Stage.SINGLE_FINISHED)
 
         prog_timer = ui.timer(2.0, _tick)
 
@@ -481,7 +478,7 @@ class Session:
                 self.dst_org = None
                 self.dst_domain_admin = ""
 
-        self.router.refresh()
+        await self.router.refresh()
 
     def __render_auth_inner(self, is_src: bool):
         current_file = self.src_org if is_src else self.dst_org
@@ -528,4 +525,4 @@ class Session:
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    ui.run(storage_secret="supersecret", reload=False, native=False, favicon="favicon.ico")
+    ui.run(storage_secret="supersecret", reload=False, native=False, favicon="🧙", host="127.0.0.1")

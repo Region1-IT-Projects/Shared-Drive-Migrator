@@ -5,6 +5,7 @@ import logging
 import time
 import uuid
 from ssl import SSLError
+from collections import deque
 
 import googleapiclient.discovery as g_discover
 import googleapiclient.errors as g_api_errors
@@ -16,7 +17,8 @@ import pdb
 
 logger = logging.getLogger(__name__)
 # mute google api stuff
-for logger_name in ['googleapiclient.discovery_cache', 'googleapiclient.discovery', 'googleapiclient.http', 'google_auth_httplib2', 'google.auth.transport.requests']:
+for logger_name in ['googleapiclient.discovery_cache', 'googleapiclient.discovery', 'googleapiclient.http',
+                    'google_auth_httplib2', 'google.auth.transport.requests', 'urllib3.connectionpool', 'python_multipart.multipart']:
     logging.getLogger(logger_name).setLevel(logging.WARNING)
 MAX_BACKOFF = 30
 mime_map = {
@@ -41,10 +43,10 @@ class UnknownAPIError(MigratorError):
 class GoogleIncompetenceError(MigratorError):
     pass
 
-class PermissionError(MigratorError):
+class GooglePermissionError(MigratorError):
     pass
 
-class AbusiveContentError(PermissionError):
+class AbusiveContentErrorGoogle(GooglePermissionError):
     pass
 
 class MissingAdminSDKError(MigratorError):
@@ -54,15 +56,40 @@ class MissingAdminSDKError(MigratorError):
 class ObjectNotFoundError(MigratorError):
     pass
 
+class TimeEstimator:
+    def __init__(self):
+        self.time_buffer = deque(maxlen=10)
+        self.time_buffer.append(0) # don't divide by zero
+        self.last_ts = time.time()
+    def reset_base_time(self):
+        self.last_ts = time.time()
+    def bip(self):
+        newtime = time.time()
+        self.time_buffer.append(newtime-self.last_ts)
+        self.last_ts = newtime
+    def get_sliding_average(self):
+        ret = 0.0
+        for v in self.time_buffer:
+            ret += v
+        return ret / len(self.time_buffer)
+    def extrapolate(self, ops_remaining: int):
+        return round(self.get_sliding_average() * ops_remaining)
+
 class APIWrapper:
     def __init__(self):
         self.total_requests = 0
         self.requests_since_error = 0
         self.total_errors = 0
         self.cur_backoff = 0.01
+        self.time_buffer = deque(maxlen=5)
+        self.time_buffer.append(0)
 
     def __str__(self):
-        return f"Requests: {self.total_requests} ({self.requests_since_error} since last error), Errors: {self.total_errors}, Backoff: {self.cur_backoff:.2f}s"
+        t_avg = 0
+        for t in self.time_buffer:
+            t_avg += t
+        t_avg /= len(self.time_buffer)
+        return f"Requests: {self.total_requests} ({self.requests_since_error} since last error), Errors: {self.total_errors}, Backoff: {self.cur_backoff:.2f}s, Average API Response Time: {t_avg:.2f}s"
 
     def __call__(self, method, retries = 1, retryable_errors = (RateLimitError, GoogleIncompetenceError), **kwargs):
         try:
@@ -80,8 +107,9 @@ class APIWrapper:
     def run(self, method, **kwargs):
         self.total_requests += 1
         self.requests_since_error += 1
+        start_time = time.time()
         try:
-            return method(**kwargs).execute()
+            ret = method(**kwargs).execute()
         except g_api_errors.HttpError as e:
             self.total_errors += 1
             self.requests_since_error = 0
@@ -100,8 +128,8 @@ class APIWrapper:
             elif e.resp.status in [400, 401]:
                 if e.reason == 'abusiveContentRestriction':
                     logger.warning("Google flagged request as abusive content")
-                    raise AbusiveContentError() from e
-                raise PermissionError() from e
+                    raise AbusiveContentErrorGoogle() from e
+                raise GooglePermissionError() from e
             elif e.resp.status == 404:
                 logger.warning(f"Object not found: {e.error_details}")
                 raise ObjectNotFoundError() from e
@@ -112,6 +140,8 @@ class APIWrapper:
             self.total_errors += 1
             self.requests_since_error = 0
             raise GoogleIncompetenceError() from e
+        self.time_buffer.append(time.time() - start_time)
+        return ret
 
     def calc_backoff(self) -> float:
         if self.requests_since_error > 10:
@@ -152,6 +182,7 @@ class Drive:
         self.all_files: dict[str, File] = {}
         self.failed_files: list[File] = []
         self.initialized = False
+        self.time_estimator = TimeEstimator()
 
     def __str__(self):
         return str(self.name)
@@ -162,7 +193,8 @@ class Drive:
             'num_files': self.num_files,
             'num_migrated_files': self.num_migrated_files,
             'status_message': self.status_message,
-            'failed_files': [f.name for f in self.failed_files]
+            'failed_files': [f.name for f in self.failed_files],
+            'time_remaining': self.time_estimator.extrapolate(self.num_files-self.num_migrated_files)
         }
 
     def build_filetree(self, files: list[dict], skip_migrated = False): #TODO switch to true when done testing, add option in UI
@@ -217,7 +249,7 @@ class User:
     def __str__(self):
         return f"User(name={self.user_name}, address={self.address})"
 
-    def _check_permissions(self, object_id, page_token=None) -> str:
+    def _check_permissions(self, object_id, page_token=None) -> str | None:
         resp = self.wrapper(
             self.drive_service.permissions().list, supportsAllDrives=True,
             fileId=object_id, pageToken=page_token, fields="nextPageToken, permissions(id, role, emailAddress)",
@@ -228,6 +260,7 @@ class User:
         for perm in permissions:
             if perm['emailAddress'] == self.address:
                 return perm['role']
+        return None
 
     def get_drives(self, include_hidden = False) -> list[SharedDrive]:
         api_resp: dict = self.wrapper(self.drive_service.drives().list, fields="drives(id, name, hidden, restrictions)")
@@ -311,7 +344,6 @@ class User:
         file_list = self._fetch_files(corpora="user", q="trashed=false")
         self.personal_drive.build_filetree(file_list)
 
-
 class SingleMigrator:
     def __init__(self, src_user: User, dst_user: User):
         if not isinstance(src_user, User) or not isinstance(dst_user, User):
@@ -320,7 +352,7 @@ class SingleMigrator:
         self.dst_user = dst_user
         self.to_migrate: list[SharedDrive] = []
         self.migrate_personal_drive = False
-        self.dowload_file_size_limit_mb = 0 #default to not allowing any downloads
+        self.download_file_size_limit_mb = 0 #default to not allowing any downloads
         self.download_location = None
         self.initialized = False #also serve as abort flag
         self.index_progress = 0
@@ -343,6 +375,7 @@ class SingleMigrator:
             logger.debug(f"Created new drive {new_drive.name} in destination account for migrating drive {drive.name}")
         assert isinstance(new_drive, SharedDrive)
         drive.status_message = "In progress"
+        drive.time_estimator.reset_base_time()
         id_map = {}
 
         def move_folder(folder: File, parent_id=None):
@@ -376,6 +409,7 @@ class SingleMigrator:
                 else:
                     move_file(child, parent_id=new_id)
             logger.debug(f"Finished moving folder {folder.name} in drive {new_drive.name}")
+            drive.time_estimator.bip()
         def move_file(file: File, parent_id=None):
             if not self.initialized:
                 return
@@ -407,6 +441,7 @@ class SingleMigrator:
             except MigratorError as e:
                 logger.error(f"Failed to mark file {file.name} as migrated in source drive: {e}")
                 # not a critical error, continue with migration
+            drive.time_estimator.bip()
 
         logger.debug("Dropping into file move loop")
         for f in drive.root:
@@ -432,11 +467,12 @@ class SingleMigrator:
     def _migrate_personal_drive(self):
         # create new "Migrated" folder in root of new drive to hold migrated personal drive files
         # mark personal drive as in-progress for UI polling
-        try:
-            pd = self.src_user.personal_drive
-            pd.status_message = "In progress"
-        except Exception:
-            pd = None
+        if not self.initialized:
+            return
+
+        pd = self.src_user.personal_drive
+        pd.status_message = "In progress"
+
         try:
             resp = self.dst_user.wrapper(self.dst_user.drive_service.files().create,
                 body={
@@ -480,12 +516,13 @@ class SingleMigrator:
             for child in folder.children:
                 if child.is_folder:
                     move_folder(child, parent_id=new_id)
+            self.src_user.personal_drive.num_migrated_files += 1
         for f in self.src_user.personal_drive.root:
             if f.is_folder:
                 move_folder(f, parent_id=new_root_id)
         logger.info("Finished creating folder structure for personal drive migration, now copying files...")
 
-        def strategy_a(to_move: File) -> bool:
+        def strategy_a(to_move: File) -> str | None:
             # share file in personal drive with new user, then have new user copy them to new drive
             self.src_user.share_object(to_move.id, self.dst_user.address, role='writer')
             new_parent = path_map.get(to_move.parent_id, new_root_id)
@@ -500,22 +537,25 @@ class SingleMigrator:
                 }, fields="id", retries=5)
             except MigratorError as e:
                 logger.warning(f"Failed to copy file {to_move.name} in personal drive migration with strategy A: {e}")
-                return False
+                return None
             return new_id.get('id', None)
 
-        def strategy_b(to_move: File) -> bool:
+        def strategy_b(to_move: File) -> str | None:
             # google takout style approach: download all files and folders in personal drive, then reupload them to new drive with new user credentials
-            if self.dowload_file_size_limit_mb > 0 and to_move.mime_type != 'application/vnd.google-apps.folder':
+            if self.download_file_size_limit_mb > 0:
                 # check file size before downloading
                 try:
                     metadata = self.src_user.wrapper(self.src_user.drive_service.files().get, fileId=to_move.id, fields="size")
                     size = int(metadata.get('size', 0))
                 except MigratorError as e:
                     logger.warning(f"Failed to get size for file {to_move.name} in personal drive migration: {e}")
-                    return False
-            if size > self.dowload_file_size_limit_mb * 1024 * 1024:
-                        logger.warning(f"Skipping file {to_move.name} in personal drive migration because it exceeds the download size limit")
-                        return False
+                    return None
+                if size > self.download_file_size_limit_mb * 1024 * 1024:
+                            logger.warning(f"Skipping file {to_move.name} in personal drive migration because it exceeds the download size limit")
+                            return None
+            else:
+                logger.debug("file downloading disabled")
+                return None
             # download file content
             if to_move.mime_type in mime_map:
                 request = self.src_user.drive_service.files().export_media(fileId=to_move.id, mimeType=mime_map[to_move.mime_type])
@@ -530,12 +570,12 @@ class SingleMigrator:
                 logger.debug(f"Downloaded file {to_move.name} in personal drive migration, now uploading...")
             except Exception as e:
                 logger.warning(f"Failed to download file {to_move.name} in personal drive migration: {e}")
-                return False
+                return None
             fh.seek(0)
             new_parent = path_map.get(to_move.parent_id, new_root_id)
             try:
                 uploader = MediaIoBaseUpload(fh, mimetype=mime_map.get(to_move.mime_type, 'application/octet-stream'), resumable=True)
-                self.dst_user.wrapper(self.dst_user.drive_service.files().create, body={
+                id = self.dst_user.wrapper(self.dst_user.drive_service.files().create, body={
                     'name': to_move.name,
                     'mimeType': to_move.mime_type,
                     'parents': [new_parent],
@@ -544,12 +584,14 @@ class SingleMigrator:
                     }}, media_body=uploader, fields="id", retries=1)
             except MigratorError as e:
                 logger.warning(f"Failed to upload file {to_move.name} in personal drive migration with strategy B: {e}")
-                return False
-            return True
+                return None
+            return id
 
+        pd.time_estimator.reset_base_time()
 
         for f in self.src_user.personal_drive.all_files.values():
             if not self.initialized:
+                logger.debug("got kill signal, bailing out of migration")
                 return
             if not isinstance(f, File):
                 logger.warning(f"Encountered non-File object in personal drive files: {f}, skipping")
@@ -569,14 +611,10 @@ class SingleMigrator:
             except MigratorError as e:
                 logger.error(f"Failed to mark file {f.name} as migrated in source drive with strategy A: {e}")
                 # not a critical error, continue with migration
-
+            pd.time_estimator.bip()
         # mark personal drive migration as completed for UI
-        try:
-            if pd:
-                pd.status_message = "Completed"
-        except Exception:
-            pass
-
+        pd.status_message = "Completed"
+        logger.debug("Clean exit of personal drive migrator")
 
     def perform_migration(self) -> bool:
         is_ok = True
@@ -600,7 +638,7 @@ class SingleMigrator:
         return is_ok and self.initialized # if abort, we arent ok
 
     def set_migration_options(self, download_file_size_limit_mb: int, download_location: str): #TODO options setter in UI
-        self.dowload_file_size_limit_mb = download_file_size_limit_mb
+        self.download_file_size_limit_mb = download_file_size_limit_mb
         self.download_location = download_location
 
     def init_migration(self, drives: list[SharedDrive], migrate_personal_drive: bool):
@@ -613,12 +651,7 @@ class SingleMigrator:
         # return list of dicts with progress info for each drive being migrated
         progress = [d.gen_status_dict() for d in self.to_migrate]
         if self.migrate_personal_drive:
-            try:
-                pd = self.src_user.personal_drive
-                progress.append(pd.gen_status_dict())
-            except Exception:
-                # if personal drive not available yet, skip
-                pass
+            progress.append(self.src_user.personal_drive.gen_status_dict())
         return progress
 
     def prepare_shared_migration(self):
