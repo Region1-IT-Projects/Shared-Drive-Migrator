@@ -5,9 +5,27 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "flask>=3.1.1",
-    "google-api-python-client>=2.174.0",
-    "google-auth-httplib2>=0.2.0",
-    "google-auth-oauthlib>=1.2.2",
-    "requests>=2.32.4",
+    "google-api-python-client>=2.188.0",
+    "google-auth-httplib2>=0.3.0",
+    "google-auth-oauthlib>=1.2.4",
+    "nicegui>=3.6.1",
+    "pywebview>=6.1",
+]
+[tool.ruff]
+# The "Happy Medium" selection
+select = [
+    "E",   # pycodestyle errors (standard PEP8)
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes (catches the "non-existent method/variable" issues)
+    "I",   # isort (keeps your imports organized)
+    "B",   # flake8-bugbear (finds design flaws and likely bugs)
+    "C4",  # flake8-comprehensions (better list/dict/set usage)
+    "UP",  # pyupgrade (keeps your syntax modern, e.g., f-strings)
+    "N",   # pep8-naming (prevents weird PascalCaseVariables)
+    "SIM", # flake8-simplify (suggests simpler code paths)
+    "T20", # flake8-print (reminds you to remove debug print statements)
+]
+
+ignore = [
+    "E501",
 ]
