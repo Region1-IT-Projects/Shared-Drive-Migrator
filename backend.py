@@ -303,9 +303,7 @@ class Drive:
             ),
         }
 
-    def build_filetree(
-        self, files: list[dict], skip_migrated=False
-    ):  # TODO switch to true when done testing, add option in UI
+    def build_filetree(self, files: list[dict], skip_migrated: bool):
         for f in files:
             newf = File(f)
             if newf.trashed or newf.is_invalid:
@@ -396,10 +394,19 @@ class User:
             fields="drives(id, name, hidden, restrictions)",
         )
         for d in api_resp.get("drives", []):
+            skip_drive = False
             if await self._check_permissions(d["id"]) in ["owner", "organizer"]:
                 try:
                     drive = SharedDrive(d)
                     if drive.hidden and not include_hidden:
+                        continue
+                    # check to make sure drive not already in list
+                    for existing_drive in self.drives:
+                        if existing_drive.id == drive.id:
+                            logger.debug(f"Drive {drive.name} (id: {drive.id}) already in drive list, skipping")
+                            skip_drive = True
+                            break
+                    if skip_drive:
                         continue
                     self.drives.append(drive)
                 except KeyError as e:
@@ -501,9 +508,7 @@ class User:
 
         return files
 
-    async def index_shared_drive_files(
-        self, drive: SharedDrive, semaphore: asyncio.Semaphore
-    ):
+    async def index_shared_drive_files(self, drive: SharedDrive, semaphore: asyncio.Semaphore, skip_migrated=False):
         """Indexes a single shared drive."""
         async with semaphore:
             file_list = await self._fetch_files(
@@ -512,9 +517,9 @@ class User:
                 supportsAllDrives=True,
                 includeItemsFromAllDrives=True,
             )
-            drive.build_filetree(file_list)
+            drive.build_filetree(file_list, skip_migrated)
 
-    async def index_personal_drive_files(self):
+    async def index_personal_drive_files(self, skip_migrated=False):
         """Indexes the personal drive."""
         file_list = await self._fetch_files(corpora="user")
         # extra filtering, weed out junk
@@ -524,7 +529,7 @@ class User:
                     f"Skipping file {f.get('name', 'unknown')} (id: {f.get('id', 'unknown')}) in personal drive because it is {'trashed' if f.get('trashed', False) else 'not owned by user'}"
                 )
                 continue
-        self.personal_drive.build_filetree(file_list)
+        self.personal_drive.build_filetree(file_list, skip_migrated)
 
 
 class SingleMigrator:
@@ -537,8 +542,8 @@ class SingleMigrator:
         self.dst_user = dst_user
         self.to_migrate: list[SharedDrive] = []
         self.migrate_personal_drive = False
-        self.download_file_size_limit_mb = 0  # default to not allowing any downloads
-        self.download_location = None
+        self.download_file_size_limit_mb = 0
+        self.skip_migrated_files = False
         self.initialized = False
         self.is_active = False  # also serve as abort flag
         self.semaphore = asyncio.Semaphore(10)
@@ -715,7 +720,7 @@ class SingleMigrator:
         # index files
         if not drive.initialized:
             drive.status_message = "Indexing..."
-            await self.src_user.index_shared_drive_files(drive, self.semaphore)
+            await self.src_user.index_shared_drive_files(drive, self.semaphore, self.skip_migrated_files)
         logger.debug(
             f"Finished indexing drive {drive.name}, found {drive.num_files} files. Starting migration..."
         )
@@ -778,7 +783,7 @@ class SingleMigrator:
         if not self.src_user.personal_drive.initialized:
             self.src_user.personal_drive.status_message = "Indexing..."
             async with self.semaphore:
-                await self.src_user.index_personal_drive_files()
+                await self.src_user.index_personal_drive_files(self.skip_migrated_files)
         self.src_user.personal_drive.status_message = "In progress"
         # create base folder in target drive
         try:
@@ -881,7 +886,6 @@ class SingleMigrator:
             if isinstance(r, Exception):
                 logger.error(f"Error copying file in personal drive migration: {r}")
                 self.src_user.personal_drive.status_message = "Completed (with errors)"
-                
 
     async def perform_migration(self) -> bool:
         """The main entry point called by the UI."""
@@ -901,11 +905,9 @@ class SingleMigrator:
                 return False
         return self.is_active
 
-    def set_migration_options(
-        self, download_file_size_limit_mb: int, download_location: str
-    ):  # TODO options setter in UI
-        self.download_file_size_limit_mb = download_file_size_limit_mb
-        self.download_location = download_location
+    def set_migration_options(self, options: dict):
+        self.download_file_size_limit_mb = options.get("max_size", 0) if options.get("allow_downloads", False) else 0
+        self.skip_migrated_files = options.get("skip_migrated", True)
 
     def init_migration(self, drives: list[SharedDrive], migrate_personal_drive: bool):
         # Initialize migration object but don't actually start migration yet

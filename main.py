@@ -80,6 +80,11 @@ class Session:
         self.migrator_obj = None
         self.api_wrapper = APIWrapper()
         ui.timer(1, self.render_footer.refresh)
+        self.user_settings = {
+            'allow_downloads': False,
+            'max_size': 500,
+            'skip_migrated': True
+        }
 
     @ui.refreshable
     async def router(self):
@@ -132,9 +137,8 @@ class Session:
                 ui.button(icon='code',\
                     on_click=lambda: ui.run_javascript('window.open("https://github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator", "_blank")')) \
                     .props('flat color=white').tooltip('Open GitHub Repo')
-                ui.switch(text="Dark Mode").bind_value(self.dark).props(
-                    "color=amber"
-                ).classes("text-white")
+                ui.button(icon="settings", on_click=self.render_options_dialog).props("flat color=white").tooltip("Settings")
+
 
     def footer_shell(self):
         with ui.footer().classes("border-t p-2 px-8"):
@@ -148,6 +152,29 @@ class Session:
             ui.label(f"Stage: {self.stage.name.replace('_', ' ').title()}").classes(
                 "text-xz tracking-widest"
             )
+
+    def render_options_dialog(self):
+        with ui.dialog() as self.settings_dialog, ui.card().style('min-width: 350px'):
+            ui.label('Application Options').classes('text-h6 mb-2')
+            with ui.column().classes('w-full gap-4'):
+                ui.switch(text="Dark Mode").bind_value(self.dark)
+
+                with ui.row().classes('items-center w-full justify-between'):
+                    download_switch = ui.switch('Allow Downloads').bind_value(self.user_settings, 'allow_downloads')
+                    # Info Icon with Tooltip
+                    with ui.icon('info', size='sm').classes('text-gray-400 cursor-help'):
+                        ui.tooltip('Enables personal-drive fallback exports via download & upload to this local machine.')
+                ui.number(label='Max download size (MB)', format='%d') \
+                    .bind_value(self.user_settings, 'max_size') \
+                    .bind_visibility_from(download_switch, 'value') \
+                    .classes('w-full ml-4')
+                with ui.row().classes('items-center w-full justify-between'):
+                    ui.switch('Skip already-migrated files').bind_value(self.user_settings, 'skip_migrated')
+                    with ui.icon('info', size='sm').classes('text-gray-400 cursor-help'):
+                        ui.tooltip('This wizard invisibly marks every file it migrates. Enabling this option will skip any files that have already been migrated in previous sessions.')
+            with ui.card_actions().classes('justify-end w-full'):
+                ui.button('Close', on_click=self.settings_dialog.close).props('flat')
+        self.settings_dialog.open()
 
     # ----- Main Renderers -------
 
@@ -209,10 +236,10 @@ class Session:
                     ).classes("text-sm text-grey-600 dark:text-grey-400 mt-4 h-24")
 
                     ui.space()  # Pushes the button to the bottom
-
-                    ui.button(
+                    with ui.button(
                         "Select Bulk", on_click=lambda: self.go_to(Stage.BATCH_SETUP)
-                    ).props("elevated color=orange-500").classes("w-full mt-4")
+                    ).props("elevated color=orange-500").classes("w-full mt-4").set_enabled(False): # TODO: re-enable when batch mode is implemented
+                        ui.tooltip("Bulk migration mode is not implemented yet")
 
     def show_admin_sdk_error(self, e: MissingAdminSDKError):
         with (
@@ -468,6 +495,7 @@ class Session:
                         else True
                     )
                     self.migrator_obj.init_migration(selected, personal)
+                    self.migrator_obj.set_migration_options(self.user_settings)
                     logging.debug(
                         f"Selected drives: {[getattr(d, 'id', str(d)) for d in selected]}"
                     )
