@@ -19,6 +19,11 @@ from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
+# Constants
+
+MAX_BACKOFF = 30 # seconds
+MAX_RECURSION_DEPTH = 100
+
 logger = logging.getLogger(__name__)
 # mute google api stuff
 for logger_name in [
@@ -31,7 +36,6 @@ for logger_name in [
     "python_multipart.multipart",
 ]:
     logging.getLogger(logger_name).setLevel(logging.WARNING)
-MAX_BACKOFF = 30
 mime_map = {
     "application/vnd.google-apps.document": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/vnd.google-apps.spreadsheet": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -329,10 +333,10 @@ class Drive:
 class SharedDrive(Drive):
     def __init__(self, infodict: dict):
         super().__init__(infodict["id"])
-        self.name = infodict["name"]
-        self.hidden = infodict.get("hidden", False)
-        self.restrictions = infodict.get("restrictions", {})
-        self.migrated: bool = "migrated" in self.name.lower()
+        self.name: str = infodict["name"]
+        self.hidden: bool = infodict.get("hidden", False)
+        self.restrictions: dict = infodict.get("restrictions", {})
+        self.migrated: bool = self.name.lower().strip().endswith("- migrated")
 
         # successor system allows resubility of already migrated drives in case of migration failure or partial migration
         self.possible_successors: list[SharedDrive] = []
@@ -340,6 +344,7 @@ class SharedDrive(Drive):
 
     def add_potential_successor(self, drive: SharedDrive):
         self.possible_successors.append(drive)
+        logger.debug(f"Drive {self.id} found potential successor {drive.id}")
 
     def set_successor(self, drive: SharedDrive):
         self.successor = drive
@@ -488,6 +493,7 @@ class User:
         """Async version of file listing."""
         next_token = None
         files = []
+        depth = 0
         while True:
             query_ret: dict = await self.wrapper(
                 self.drive_service.files().list,
@@ -505,6 +511,11 @@ class User:
             files.extend(query_ret.get("files", []))
             if not next_token:
                 break
+            if depth > MAX_RECURSION_DEPTH:
+                # not acutally recursion but whatevs
+                logger.warning("Bailing out of _fetch_files due to hitting max. recursion depth! File list may be incomplete.")
+                break
+            depth += 1
 
         return files
 
@@ -931,7 +942,9 @@ class SingleMigrator:
         )
         for d in src_drives:
             for dd in dst_drives:
-                if d.name == dd.name:
+                if not isinstance(d, SharedDrive) or not isinstance(dd, SharedDrive):
+                    raise TypeError("Expected SharedDrive")
+                if d.name.casefold().strip() == dd.name.casefold().strip():
                     d.add_potential_successor(dd)
         return src_drives
 
@@ -948,6 +961,7 @@ class Org:
         self.user_service = None
         self.users = []
         self.wrapper = wrapper
+        self.id: str = keyfile_dict.get("private_key_id")
 
     def set_admin(self, address: str):
         # validate address is valid email address

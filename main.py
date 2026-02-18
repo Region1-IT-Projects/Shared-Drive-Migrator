@@ -106,7 +106,7 @@ class Session:
 
     def go_to(self, stage: Stage):
         """Handle state changes, checking preconditions are met"""
-        match Stage:
+        match stage:
             case Stage.AUTH_SETUP:
                 self.__clear_auth_file(True)
                 self.__clear_auth_file(False)
@@ -272,7 +272,7 @@ class Session:
         def update_continue_btn():
             if isinstance(state["src"], User) and isinstance(state["dst"], User):
                 self.migrator_obj = SingleMigrator(state["src"], state["dst"])
-            continue_btn.set_enabled(True)
+                continue_btn.set_enabled(True)
 
         @ui.refreshable
         def render_account_card(title: str, key: str):
@@ -604,16 +604,19 @@ class Session:
         with container:
             ui.label("Migration Complete!").classes("text-h4 text-green-600")
 
-    # ----- Auth Specific Helpers ------
+# ----- Auth Specific Helpers ------
 
     async def ingest_keyfile(self, e: events.UploadEventArguments, is_src: bool):
         file = await e.file.json()
         try:
             tmp = Org(file, self.api_wrapper)
         except ValueError as e:
-            ui.notify("Invalid keyfile. Please try again.")
+            ui.notify("Invalid keyfile. Please try again.", type='negative')
             logging.warning(f"Ingest keyfile failed! {e}")
             return
+        except KeyError as e:
+            ui.notify("Keyfile is malformed!", type='negative')
+            logging.warning(f"Rejected keyfile due to {e}")
         if is_src:
             self.src_org = tmp
             try:
@@ -708,10 +711,14 @@ class Session:
                 )
 
     def __is_auth_configured(self) -> bool:
+        if not isinstance(self.src_org, Org) or not isinstance(self.dst_org, Org):
+            return False
+        if (self.dst_org.id == self.src_org.id):
+            logging.warning(f"JSON Keyfiles are identical! {self.dst_org.id}, {self.src_org.id}")
+            ui.notify("Same key was uploaded twice. Are you sure you meant to do that?", type='warning')
+            #theoretically same gcloud account could control both domains, don't error
         return (
-            self.dst_org is not None
-            and self.dst_domain_admin is not None
-            and self.src_org is not None
+            self.dst_domain_admin is not None
             and self.src_domain_admin is not None
         )
 
