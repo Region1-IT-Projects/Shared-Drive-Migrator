@@ -25,8 +25,12 @@ select = [
     "N",   # pep8-naming (prevents weird PascalCaseVariables)
     "SIM", # flake8-simplify (suggests simpler code paths)
     "T20", # flake8-print (reminds you to remove debug print statements)
+    #"ANN",
+    "PTH",
 ]
 
 ignore = [
     "E501",
+    "ANN101", # Ignore "missing type for self" (too noisy)
+    "ANN102", # Ignore "missing type for cls"
 ]

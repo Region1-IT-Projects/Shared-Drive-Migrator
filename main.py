@@ -9,13 +9,14 @@ from dotenv import load_dotenv
 from nicegui import events, ui
 
 from backend import (
-    APIWrapper,
     MigratorError,
     MissingAdminSDKError,
     Org,
     SharedDrive,
-    SingleMigrator,
+    Migrator,
+    Person,
     User,
+    get_api_stats,
 )
 
 load_dotenv()
@@ -77,8 +78,7 @@ class Session:
         self.src_domain_admin = os.getenv("SRC_ADMIN_EMAIL", "")
         self.dst_org = None
         self.dst_domain_admin = os.getenv("DST_ADMIN_EMAIL", "")
-        self.migrator_obj = None
-        self.api_wrapper = APIWrapper()
+        self.migrator = Migrator()
         ui.timer(1, self.render_footer.refresh)
         self.user_settings = {
             'allow_downloads': False,
@@ -148,7 +148,7 @@ class Session:
     def render_footer(self):
         with ui.row().classes("w-full items-center justify-between"):
             # TODO: api rate limit details
-            ui.label(str(self.api_wrapper)).classes("text-xs")
+            ui.label(get_api_stats()).classes("text-xs")
             ui.label(f"Stage: {self.stage.name.replace('_', ' ').title()}").classes(
                 "text-xz tracking-widest"
             )
@@ -271,7 +271,7 @@ class Session:
 
         def update_continue_btn():
             if isinstance(state["src"], User) and isinstance(state["dst"], User):
-                self.migrator_obj = SingleMigrator(state["src"], state["dst"])
+                self.migrator.add_target(state["src"], state["dst"])
                 continue_btn.set_enabled(True)
 
         @ui.refreshable
@@ -394,14 +394,13 @@ class Session:
             continue_btn.set_enabled(False)
 
     async def render_single_drive_select(self):
+        target_person = self.migrator.targets[0]
         container = ui.column().classes("w-full items-center gap-8 p-8")
         with container:
             ui.label("Loading drives...").classes("text-grey")
             ui.spinner(size="lg")
             try:
-                drive_list: list[
-                    SharedDrive
-                ] = await self.migrator_obj.src_user.get_drives()
+                drive_list: list[SharedDrive] = await target_person.generate_drive_list()
             except Exception as e:
                 logging.error(f"Failed to fetch drive list: {e}")
                 ui.notify(
@@ -494,8 +493,8 @@ class Session:
                         if migrate_personal_switch is not None
                         else True
                     )
-                    self.migrator_obj.init_migration(selected, personal)
-                    self.migrator_obj.set_migration_options(self.user_settings)
+                    target_person.set_drives(selected)
+                    self.migrator.init_migration(personal, self.user_settings)
                     logging.debug(
                         f"Selected drives: {[getattr(d, 'id', str(d)) for d in selected]}"
                     )
@@ -524,7 +523,7 @@ class Session:
             error_dialog.open()
 
         async def cancel_migration():
-            self.migrator_obj.abort()
+            self.migrator.abort()
             ui.notify("Migration Cancelled", type="warning")
             # Clean up UI or redirect
             prog_timer.deactivate()
@@ -532,7 +531,8 @@ class Session:
 
         @ui.refreshable
         def render_progress():
-            drive_progress = self.migrator_obj.poll_progress() or []
+            # TODO update to new progress dict format
+            drive_progress = self.migrator.poll_progress()
             with ui.column().classes("w-full max-w-4xl gap-4"):
                 for d in drive_progress:
                     name = d.get("name", "Unknown")
@@ -588,7 +588,7 @@ class Session:
                     )
                     .props("outline color=blue")
                     .bind_enabled_from(
-                        self.migrator_obj, "is_active", backward=lambda v: not v
+                        self.migrator, "initialized", backward=lambda v: not v
                     )
                 )
                 ui.button(
@@ -599,17 +599,20 @@ class Session:
             render_progress.refresh()
 
         prog_timer = ui.timer(1.0, _tick)
-        res = await self.migrator_obj.perform_migration()
+        res = await self.migrator.perform_migration()
         logging.debug(f"Migration completed with result: {res}")
         with container:
             ui.label("Migration Complete!").classes("text-h4 text-green-600")
+
+    def render_multi_setup(self):
+        pass #TODO
 
 # ----- Auth Specific Helpers ------
 
     async def ingest_keyfile(self, e: events.UploadEventArguments, is_src: bool):
         file = await e.file.json()
         try:
-            tmp = Org(file, self.api_wrapper)
+            tmp = Org(file)
         except ValueError as e:
             ui.notify("Invalid keyfile. Please try again.", type='negative')
             logging.warning(f"Ingest keyfile failed! {e}")

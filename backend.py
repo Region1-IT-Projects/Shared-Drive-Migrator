@@ -244,6 +244,10 @@ class APIWrapper:
     def shutdown(self):
         self.executor.shutdown(wait=True)
 
+api = APIWrapper()
+
+def get_api_stats():
+    return str(api)
 
 uncopyable_mime_types = [
     "application/vnd.google-apps.shortcut",
@@ -351,9 +355,7 @@ class SharedDrive(Drive):
 
 
 class User:
-    def __init__(
-        self, name, address, service_account, photo_url, api_wrapper: APIWrapper
-    ):
+    def __init__(self, name, address, service_account, photo_url):
         self.user_name = name
         self.address = address
         # MODIFIED: Use ThreadLocalHttp to ensure thread safety
@@ -361,7 +363,6 @@ class User:
             "drive", "v3", http=ThreadLocalHttp(service_account.with_subject(address))
         )
         self.photo = photo_url
-        self.wrapper: APIWrapper = api_wrapper
         self.personal_drive = Drive(
             self.drive_service.files().get(fileId="root", fields="id").execute()["id"]
         )
@@ -377,7 +378,7 @@ class User:
         page_token = None
         permissions = []
         while True:
-            resp = await self.wrapper(
+            resp = await api(
                 self.drive_service.permissions().list,
                 supportsAllDrives=True,
                 fileId=object_id,
@@ -394,7 +395,7 @@ class User:
         return None
 
     async def get_drives(self, include_hidden=False) -> list[SharedDrive]:
-        api_resp: dict = await self.wrapper(
+        api_resp: dict = await api(
             self.drive_service.drives().list,
             fields="drives(id, name, hidden, restrictions)",
         )
@@ -426,7 +427,7 @@ class User:
         logger.debug(
             f"Sharing object {object_id} from {self.address} to {email} as {role}..."
         )
-        resp = await self.wrapper(
+        resp = await api(
             self.drive_service.permissions().create,
             supportsAllDrives=True,
             fileId=object_id,
@@ -453,7 +454,7 @@ class User:
                 f"Attempting to remove permission {permission_id} which is not in outstanding shares for user {self.address}"
             )
         try:
-            await self.wrapper(
+            await api(
                 self.drive_service.permissions().delete,
                 supportsAllDrives=True,
                 fileId=object_id,
@@ -479,7 +480,7 @@ class User:
             "hidden": predecessor_drive.hidden,
             "themeId": "abacus",
         }
-        resp = await self.wrapper(
+        resp = await api(
             self.drive_service.drives().create,
             body=body,
             requestId=uuid.uuid4().hex,
@@ -495,7 +496,7 @@ class User:
         files = []
         depth = 0
         while True:
-            query_ret: dict = await self.wrapper(
+            query_ret: dict = await api(
                 self.drive_service.files().list,
                 pageToken=next_token,
                 fields="nextPageToken, files(id, name, kind, mimeType, parents, owners, trashed, properties, ownedByMe, permissions)",
@@ -542,41 +543,38 @@ class User:
                 continue
         self.personal_drive.build_filetree(file_list, skip_migrated)
 
-
-class SingleMigrator:
-    def __init__(self, src_user: User, dst_user: User):
-        if not isinstance(src_user, User) or not isinstance(dst_user, User):
-            raise ValueError(
-                "Invalid source or destination user! Both must be valid User objects."
-            )
-        self.src_user = src_user
-        self.dst_user = dst_user
+class Person:
+    def __init__(self, source_user: User, dest_user: User):
+        self.src_user = source_user
+        self.dst_user = dest_user
         self.to_migrate: list[SharedDrive] = []
-        self.migrate_personal_drive = False
-        self.download_file_size_limit_mb = 0
-        self.skip_migrated_files = False
-        self.initialized = False
-        self.is_active = False  # also serve as abort flag
-        self.semaphore = asyncio.Semaphore(10)
-        self.transfer_semaphore = asyncio.Semaphore(3)  # for offline heavy transfers
-        self.wrapper = (
-            src_user.wrapper
-        )  # src_user and dst_user wrapper should be the same object
+        self.run = True
+
+    async def generate_drive_list(self):
+        """
+        generate list of drives, identify duplicate names across source and destination accounts and mark for user confirmation
+        """
+        src_drives, dst_drives = await asyncio.gather(
+            self.src_user.get_drives(),
+            self.dst_user.get_drives(),
+            return_exceptions=False,
+        )
+        for d in src_drives:
+            for dd in dst_drives:
+                if not isinstance(d, SharedDrive) or not isinstance(dd, SharedDrive):
+                    raise TypeError("Expected SharedDrive")
+                if d.name.casefold().strip() == dd.name.casefold().strip():
+                    d.add_potential_successor(dd)
+        return src_drives
+
+    def set_drives(self, to_migrate: list[Drive]):
+        self.to_migrate = to_migrate
 
     def abort(self):
-        self.is_active = False
-        self.initialized = False
-        logger.info(
-            "Abort flag set, migration will stop after current file is finished."
-        )
+        logger.info("Got abort command")
+        self.run = False
 
-    async def _online_copy_file(
-        self,
-        file: File,
-        parent_id: str | None,
-        src_drive: Drive,
-        mark_failures: bool = True,
-    ):
+    async def _online_copy_file(self, file: File, parent_id: str | None, sem: asyncio.Semaphore):
         """Worker to asynchronously copy single file"""
         if not self.initialized or not self.is_active:
             return
@@ -586,9 +584,9 @@ class SingleMigrator:
             "parents": [parent_id] if parent_id else [],
             "properties": {"migrator_source_id": file.id},
         }
-        async with self.semaphore:
+        async with sem:
             try:
-                resp = await self.wrapper(
+                resp = await api(
                     self.dst_user.drive_service.files().copy,
                     supportsAllDrives=True,
                     fileId=file.id,
@@ -600,18 +598,14 @@ class SingleMigrator:
                     logger.error(
                         f"Failed to copy file {file.name}, empty response from API: {resp}"
                     )
-                    if mark_failures:
-                        src_drive.failed_files.append(file)
                     raise UnknownAPIError("Empty response from API")
             except MigratorError as e:
                 logger.error(
-                    f"Failed to copy file {file.name} from drive {src_drive.name}: {e}"
+                    f"Failed to copy file {file.name}: {e}"
                 )
-                if mark_failures:
-                    src_drive.failed_files.append(file)
                 raise e
             try:
-                await self.wrapper(
+                await api(
                     self.src_user.drive_service.files().update,
                     supportsAllDrives=True,
                     fileId=file.id,
@@ -619,34 +613,32 @@ class SingleMigrator:
                 )
             except MigratorError as e:
                 logger.warning(
-                    f"Failed to mark file {file.name} as migrated from drive {src_drive.name}: {e}"
+                    f"Failed to mark file {file.name} as migrated: {e}"
                 )
                 # don't raise error since the file was successfully copied, just log it and move on
-            src_drive.bip()
             logger.debug(
-                f"Copied file {file.name} from drive {src_drive.name} to new location with id {new_id}"
+                f"Copied file {file.name} to new location with id {new_id}"
             )
 
-    async def _offline_copy_file(self, file: File, parent_id: str) -> str | None:
-        """Refactored Async Strategy B: Download and Re-upload.
-        Note: Currently only works for personal drive!"""
-        async with self.transfer_semaphore:  # Limit heavy transfers
-            loop = asyncio.get_running_loop()
-
-            if self.download_file_size_limit_mb > 0:
-                try:
-                    metadata = await self.wrapper(
-                        self.src_user.drive_service.files().get,
-                        fileId=file.id,
-                        fields="size",
-                    )
-                    size = int(metadata.get("size", 0))
-                    if size > self.download_file_size_limit_mb * 1024 * 1024:
-                        logger.warning(f"Skipping {file.name}: Exceeds size limit.")
-                        raise FileNotDownloadableError("over limit")
-                except MigratorError as e:
-                    logger.error(f"Failed to download file {file.name}: {e}")
-                    raise e
+    async def _offline_copy_file(self, file: File, parent_id: str, max_size: int, sem: asyncio.Semaphore) -> str | None:
+        """Refactored Async Strategy B: Download and Re-upload."""
+        if max_size <= 0:
+            logger.debug("Skipping offline migration attempt, downloading is disabled.")
+            return
+        async with sem:  # Limit heavy transfers
+            try:
+                metadata = await api(
+                    self.src_user.drive_service.files().get,
+                    fileId=file.id,
+                    fields="size",
+                )
+                size = int(metadata.get("size", 0))
+                if size > max_size * 1024 * 1024:
+                    logger.warning(f"Skipping {file.name}: Exceeds size limit.")
+                    raise FileNotDownloadableError("over limit")
+            except MigratorError as e:
+                logger.error(f"Failed to download file {file.name}: {e}")
+                raise e
 
             def _blocking_transfer():
                 fh = io.BytesIO()
@@ -687,11 +679,22 @@ class SingleMigrator:
                 )
                 return id_resp.get("id")
 
+            loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, _blocking_transfer)
 
-    async def _migrate_folder_recursive(
-        self, folder: File, parent_id: str | None, src_drive: Drive
-    ):
+    async def copy_file(self, file: File, parent_id, src_drive: Drive, sem: asyncio.Semaphore, sem_heavy: asyncio.Semaphore):
+        try:
+            await self._online_copy_file(file, parent_id, sem)
+        except MigratorError:
+            logger.warning(f"Failed online migration of {file.name}, attempting offline method")
+            try:
+                await self._offline_copy_file(file, parent_id, sem_heavy)
+            except MigratorError:
+                logging.error(f"Both methods of copying file {file.name} failed!")
+                src_drive.failed_files.append(file.name)
+        src_drive.bip()
+
+    async def folder_build_migration_tasks(self, folder: File, parent_id: str | None, src_drive: Drive, sem: asyncio.Semaphore) -> list:
         """Recursively creates folders and schedules file copies."""
         if not self.initialized or not self.is_active:
             return
@@ -701,8 +704,8 @@ class SingleMigrator:
             "parents": [parent_id] if parent_id else [],
             "properties": {"migrator_source_id": folder.id},
         }
-        async with self.semaphore:
-            resp = await self.wrapper(
+        async with sem:
+            resp = await api(
                 self.dst_user.drive_service.files().create,
                 supportsAllDrives=True,
                 body=new_folder_body,
@@ -720,23 +723,33 @@ class SingleMigrator:
         tasks = []
         for child in folder.children:
             if child.is_folder:
-                tasks.append(self._migrate_folder_recursive(child, new_id, src_drive))
+                tasks.extend(await self.folder_build_migration_tasks(child, new_id, src_drive))
             else:
-                tasks.append(self._online_copy_file(child, new_id, src_drive))
+                tasks.append(self.copy_file(child, new_id, src_drive))
 
-        await asyncio.gather(*tasks, return_exceptions=False)
+        return tasks
 
-    async def _migrate_shared_drive(self, drive: SharedDrive):
+    def gen_status_dict(self) -> dict:
+        drives = {}
+        for d in self.to_migrate:
+            drivename = d.name
+            if drivename in drives:
+                drivename += " (" + d.id + ")"
+            drives[drivename] = d.gen_status_dict
+        drives["personal"] = self.src_user.personal_drive.gen_status_dict()
+        return {self.src_user.user_name: drives}
+
+    async def migrate_shared_drive(self, drive: SharedDrive, sem: asyncio.Semaphore, sem_heavy: asyncio.Semaphore):
         logger.debug(f"Starting processing of drive{drive.name}...")
         # index files
         if not drive.initialized:
             drive.status_message = "Indexing..."
-            await self.src_user.index_shared_drive_files(drive, self.semaphore, self.skip_migrated_files)
+            await self.src_user.index_shared_drive_files(drive, sem, self.skip_migrated_files)
         logger.debug(
             f"Finished indexing drive {drive.name}, found {drive.num_files} files. Starting migration..."
         )
         # share old drive with new user
-        async with self.semaphore:
+        async with sem:
             permission_id = await self.src_user.share_object(
                 drive.id, self.dst_user.address, role="organizer"
             )
@@ -750,7 +763,7 @@ class SingleMigrator:
             )
             new_drive = drive.successor
         else:
-            async with self.semaphore:
+            async with sem:
                 new_drive = await self.dst_user.create_drive(drive)
             drive.set_successor(new_drive)
             logger.debug(
@@ -765,9 +778,9 @@ class SingleMigrator:
         tasks = []
         for f in drive.root:
             if f.is_folder:
-                tasks.append(self._migrate_folder_recursive(f, new_drive.id, drive))
+                tasks.append(self.folder_build_migration_tasks(f, new_drive.id, drive, sem))
             else:
-                tasks.append(self._online_copy_file(f, new_drive.id, drive))
+                tasks.append(self.copy_file(f, new_drive.id, drive, sem, sem_heavy))
 
         await asyncio.gather(*tasks, return_exceptions=False)
         logger.debug(f"Removing share from source drive {drive.name}...")
@@ -788,12 +801,12 @@ class SingleMigrator:
                 logger.error(f"Failed to rename source drive {drive.name}: {e}")
             drive.migrated = True
 
-    async def _migrate_personal_drive(self):
+    async def migrate_personal_drive(self, sem: asyncio.Semaphore, sem_heavy: asyncio.Semaphore):
         if not self.initialized or not self.is_active:
             return
         if not self.src_user.personal_drive.initialized:
             self.src_user.personal_drive.status_message = "Indexing..."
-            async with self.semaphore:
+            async with sem:
                 await self.src_user.index_personal_drive_files(self.skip_migrated_files)
         self.src_user.personal_drive.status_message = "In progress"
         # create base folder in target drive
@@ -821,136 +834,85 @@ class SingleMigrator:
             )
             self.src_user.personal_drive.status_message = f"Failed: {e}"
             raise e
-        path_map = {self.src_user.personal_drive.id: new_root_id}
-
-        # build folder structure in new drive by creating folders with same name and properties as old folders
-        # recursive to ensure file structure is preserved
-        async def move_folder(folder: File, parent_id):
-            new_folder_metadata = {
-                "name": folder.name,
-                "mimeType": folder.mime_type,
-                "parents": [parent_id],
-                "properties": {"migrator_source_id": folder.id},
-            }
-            try:
-                resp = await self.dst_user.wrapper(
-                    self.dst_user.drive_service.files().create,
-                    body=new_folder_metadata,
-                    fields="id",
-                )
-                new_id = resp.get("id", None)
-                if not new_id:
-                    logger.error(
-                        f"Failed to create folder {folder.name} in personal drive migration"
-                    )
-                    raise UnknownAPIError(
-                        f"Failed to create folder {folder.name} in personal drive migration. Got response: {resp}"
-                    )
-                path_map[folder.id] = new_id
-                self.src_user.personal_drive.bip()
-            except MigratorError as e:
-                logger.error(
-                    f"Failed to create folder {folder.name} in personal drive migration: {e}"
-                )
-                raise e
-            for child in folder.children:
-                if child.is_folder:
-                    await move_folder(child, parent_id=new_id)
-
-        async def copy_file(file: File, parent_id):
-            if not parent_id:
-                logger.error(
-                    f"No parent ID found for file {file} in personal drive migration! Skipping."
-                )
-                self.src_user.personal_drive.failed_files.append(file)
-                return
-            try:
-                await self._online_copy_file(
-                    file, parent_id, self.src_user.personal_drive, False
-                )
-                self.src_user.personal_drive.bip()
-                return
-            except MigratorError:
-                logger.warning(
-                    f"Personal drive: failed online migration of {file.name}, attempting offline method"
-                )
-            try:
-                await self._offline_copy_file(file, parent_id)
-                self.src_user.personal_drive.bip()
-            except MigratorError:
-                logging.error(f"Both methods of copying file {file.name} failed!")
-                self.src_user.personal_drive.failed_files.append(file.name)
+        tasks = []
 
         for f in self.src_user.personal_drive.root:
             if f.is_folder:
-                await move_folder(f, parent_id=new_root_id)
+                tasks.extend(await self.folder_build_migration_tasks(f, new_root_id, self.src_user.personal_drive, sem))
+            else:
+                tasks.append(self.copy_file(f, new_root_id, self.src_user.personal_drive, sem, sem_heavy))
         logger.info(
             "Finished creating folder structure for personal drive migration, now copying files..."
         )
-        file_copy_tasks = [
-            copy_file(f, path_map.get(f.parent_id))
-            for f in self.src_user.personal_drive.all_files.values()
-        ]
-        res = await asyncio.gather(*file_copy_tasks, return_exceptions=True)
+
+        res = await asyncio.gather(*tasks, return_exceptions=True)
         self.src_user.personal_drive.status_message = "Completed"
         for r in res:
             if isinstance(r, Exception):
                 logger.error(f"Error copying file in personal drive migration: {r}")
                 self.src_user.personal_drive.status_message = "Completed (with errors)"
 
+class Migrator:
+    def __init__(self, max_concurrent: int = 10, max_concurrent_heavy: int = 3):
+        self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.transfer_semaphore = asyncio.Semaphore(max_concurrent_heavy)  # for offline heavy transfers
+        self.initialized: bool = False
+        self.download_file_size_limit_mb = 0
+        self.skip_migrated_files = False
+        self.migrate_personal_drive = False
+        self.targets: list[Person] = []
+
+    def add_target(self, src: User, dst: User):
+        if not isinstance(src, User):
+            raise TypeError(f"Expected User class, got {type(src)}")
+        if not isinstance(dst, User):
+            raise TypeError(f"Expected User class, got {type(dst)}")
+        for t in self.targets:
+            if t.src_user.address == src.address:
+                raise ValueError("Duplicate user!")
+        self.targets.append(Person(src, dst))
+
     async def perform_migration(self) -> bool:
-        """The main entry point called by the UI."""
-        self.initialized = True
-        self.is_active = True
-        drive_tasks = [self._migrate_shared_drive(d) for d in self.to_migrate]
-        if self.migrate_personal_drive:
-            drive_tasks.append(self._migrate_personal_drive())
-        logger.debug(
-            f"Starting migration with {len(drive_tasks)} concurrent drive migrations..."
-        )
-        ret = await asyncio.gather(*drive_tasks, return_exceptions=True)
+        tasks = []
+        for person in self.targets:
+            if self.migrate_personal_drive:
+                tasks.append(person.migrate_personal_drive(self.semaphore, self.transfer_semaphore))
+            for drive in person.to_migrate:
+                tasks.append(person.migrate_shared_drive(drive, self.semaphore, self.transfer_semaphore))
+        logger.debug(f"Prepared {len(tasks)} migration tasks.")
+
+        ret = await asyncio.gather(*tasks, return_exceptions=True)
+        logger.debug("Migration tasks completed.")
         for r in ret:
             if isinstance(r, Exception):
                 logger.error(f"Migration task failed with error: {r}")
-                self.is_active = False
-                return False
-        return self.is_active
+                raise r
+        return True
 
-    def set_migration_options(self, options: dict):
-        self.download_file_size_limit_mb = options.get("max_size", 0) if options.get("allow_downloads", False) else 0
-        self.skip_migrated_files = options.get("skip_migrated", True)
-
-    def init_migration(self, drives: list[SharedDrive], migrate_personal_drive: bool):
+    def init_migration(self, migrate_personal_drive: bool, global_options: dict):
         # Initialize migration object but don't actually start migration yet
-        self.to_migrate = drives
+        if not len(self.targets):
+            raise ValueError("Cannot migrate 0 users!")
         self.migrate_personal_drive = migrate_personal_drive
+        self.download_file_size_limit_mb = global_options.get("max_size", 0) if global_options.get("allow_downloads", False) else 0
+        self.skip_migrated_files = global_options.get("skip_migrated", True)
         self.initialized = True
 
-    def poll_progress(self) -> list[dict]:
+    def poll_progress(self) -> dict[str, dict[str, dict]]:
         # return list of dicts with progress info for each drive being migrated
-        progress = [d.gen_status_dict() for d in self.to_migrate]
-        if self.migrate_personal_drive:
-            progress.append(self.src_user.personal_drive.gen_status_dict())
+        progress = {}
+        for person in self.targets:
+            progress.update(person.gen_status_dict())
         return progress
 
-    async def generate_drive_list(self):
-        # generate list of drives, identify duplicate names across source and destination accounts and mark for user confirmation
-        src_drives, dst_drives = await asyncio.gather(
-            self.src_user.get_drives(),
-            self.dst_user.get_drives(),
-            return_exceptions=False,
-        )
-        for d in src_drives:
-            for dd in dst_drives:
-                if not isinstance(d, SharedDrive) or not isinstance(dd, SharedDrive):
-                    raise TypeError("Expected SharedDrive")
-                if d.name.casefold().strip() == dd.name.casefold().strip():
-                    d.add_potential_successor(dd)
-        return src_drives
+    def abort(self):
+        for person in self.targets:
+            person.abort()
+        self.initialized = False
 
 
 class Org:
-    def __init__(self, keyfile_dict, wrapper: APIWrapper):
+    def __init__(self, keyfile_dict):
         self.worker = service_account.Credentials.from_service_account_info(
             keyfile_dict,
             scopes=[
@@ -960,7 +922,6 @@ class Org:
         )
         self.user_service = None
         self.users = []
-        self.wrapper = wrapper
         self.id: str = keyfile_dict.get("private_key_id")
 
     def set_admin(self, address: str):
@@ -993,7 +954,7 @@ class Org:
             logger.error("Attempted to search for user without user service instance!")
             raise ValueError("User service not configured!")
 
-        query_ret = await self.wrapper(
+        query_ret = await api(
             self.user_service.users().list, customer="my_customer", pageToken=page_token
         )
 
@@ -1013,7 +974,7 @@ class Org:
 
     async def find_user(self, name) -> User | None:
 
-        query_ret = await self.wrapper(
+        query_ret = await api(
             self.user_service.users().list,
             customer="my_customer",
             query=f'name:"{name}"',
@@ -1031,13 +992,12 @@ class Org:
             name,
             user_info["primaryEmail"],
             self.worker,
-            user_info.get("thumbnailPhotoUrl"),
-            self.wrapper,
+            user_info.get("thumbnailPhotoUrl")
         )
 
     async def find_user_by_email(self, email) -> User | None:
 
-        query_ret = await self.wrapper(
+        query_ret = await api(
             self.user_service.users().list,
             customer="my_customer",
             query=f'email:"{email}"',
@@ -1051,6 +1011,5 @@ class Org:
             user_info["name"]["fullName"],
             email,
             self.worker,
-            user_info.get("thumbnailPhotoUrl"),
-            self.wrapper,
+            user_info.get("thumbnailPhotoUrl")
         )

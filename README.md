@@ -7,7 +7,8 @@
 Term | Description
 ---- | ----
 Org | A google workspace organization. 1:1 mapped to a keyfile.
-User | A user within *both* organizations whose associated content will be moved
+User | A user within an organization
+Person | A person whose files we are migrating, comprised of TWO users
 Drive | A shared / team drive 
 
 ## LLM Usage Disclosure
