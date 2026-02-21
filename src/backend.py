@@ -18,9 +18,8 @@ from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
-import pdb
-# Constants
 
+# Constants
 MAX_BACKOFF = 30 # seconds
 MAX_RECURSION_DEPTH = 100
 
