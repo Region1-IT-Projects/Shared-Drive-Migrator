@@ -1,0 +1,41 @@
+name: Build Cross-Platform Binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install Dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Build with PyInstaller 
+        run: uv run pyinstaller --noconfirm --onefile --windowed --name "DriveMigrator" --collect-all "nicegui" src/main.py
+
+      - name: Upload Binaries to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/DriveMigrator.exe
+            dist/DriveMigrator
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

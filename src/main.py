@@ -7,21 +7,20 @@ from enum import Enum
 import requests
 from dotenv import load_dotenv
 from nicegui import events, ui
-
+import multiprocessing
 from backend import (
     MigratorError,
     MissingAdminSDKError,
     Org,
     SharedDrive,
     Migrator,
-    Person,
     User,
     get_api_stats,
 )
 
 load_dotenv()
 
-VERSION = "3.0.1-alpha"
+VERSION = "3.0.1-alpha02"
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -745,10 +744,22 @@ class Session:
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    ui.run(
-        storage_secret="supersecret",
-        reload=False,
-        native=False,
-        favicon="🧙",
-        host="127.0.0.1",
-    )
+    # don't fork bomb in pyinstaller version
+    multiprocessing.freeze_support()
+    try:
+        ui.run(
+            storage_secret="supersecret",
+            reload=False,
+            native=False,
+            favicon="🧙",
+            host="127.0.0.1",
+        )
+    except KeyboardInterrupt:
+        logging.info("Goodbye")
+        exit(0)
+    except Exception as e:
+        logging.error(f"Process failed: {e}")
+        #keep the script window open on a crash for diagnosis
+        #(mostly for pyinstaller - packaged variants)
+        while True:
+            pass
