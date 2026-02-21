@@ -34,3 +34,6 @@ ignore = [
     "ANN101", # Ignore "missing type for self" (too noisy)
     "ANN102", # Ignore "missing type for cls"
 ]
+
+[tool.pyright]
+typeCheckingMode = "basic"

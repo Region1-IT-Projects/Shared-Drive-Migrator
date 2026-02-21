@@ -83,7 +83,7 @@ class Session:
         self.user_settings = {
             'allow_downloads': False,
             'max_size': 500,
-            'skip_migrated': True
+            'skip_migrated': False # for testing
         }
 
     @ui.refreshable
@@ -119,6 +119,10 @@ class Session:
                     )
                 else:
                     self.stage = Stage.MODE_SELECT
+            case Stage.SINGLE_SETUP_ACCT: #TODO: this reset for multi-account
+                if isinstance(self.migrator, Migrator):
+                    self.migrator.targets.clear()
+                self.stage = Stage.SINGLE_SETUP_ACCT
             case _:
                 self.stage = stage
         logging.debug(f"App stage is now {self.stage.name}")
@@ -236,10 +240,8 @@ class Session:
                     ).classes("text-sm text-grey-600 dark:text-grey-400 mt-4 h-24")
 
                     ui.space()  # Pushes the button to the bottom
-                    with ui.button(
-                        "Select Bulk", on_click=lambda: self.go_to(Stage.BATCH_SETUP)
-                    ).props("elevated color=orange-500").classes("w-full mt-4").set_enabled(False): # TODO: re-enable when batch mode is implemented
-                        ui.tooltip("Bulk migration mode is not implemented yet")
+                    ui.button("Select Bulk", on_click=lambda: self.go_to(Stage.BATCH_SETUP)).props("elevated color=orange-500").classes("w-full mt-4").set_enabled(False) # TODO: re-enable when batch mode is implemented
+                    ui.tooltip("Bulk migration mode is not implemented yet")
 
     def show_admin_sdk_error(self, e: MissingAdminSDKError):
         with (
@@ -271,8 +273,11 @@ class Session:
 
         def update_continue_btn():
             if isinstance(state["src"], User) and isinstance(state["dst"], User):
-                self.migrator.add_target(state["src"], state["dst"])
-                continue_btn.set_enabled(True)
+                try:
+                    self.migrator.add_target(state["src"], state["dst"])
+                    continue_btn.set_enabled(True)
+                except (ValueError, TypeError) as e:
+                    ui.notify(e, type='negative')
 
         @ui.refreshable
         def render_account_card(title: str, key: str):
@@ -280,7 +285,6 @@ class Session:
                 ui.label(title).classes("text-sm text-grey-600 dark:text-grey-400")
                 acct = state[key]
                 if isinstance(acct, User):
-                    update_continue_btn()
                     # SUCCESS STATE: Show the address
                     with ui.column().classes(
                         "grow w-full items-center justify-center gap-3"
@@ -332,6 +336,7 @@ class Session:
                             # Refresh this card with the new User object
                             card.clear()
                             await render_account_card.refresh()
+                            update_continue_btn()
 
                     ui.button("Set Address", on_click=handle_manual_set).props("flat")
 
@@ -358,6 +363,7 @@ class Session:
                 render_account_card("Source Account", "src")
                 ui.icon("arrow_forward", size="32px")
                 render_account_card("Destination Account", "dst")
+                update_continue_btn()
 
         container = ui.column().classes("w-full items-center gap-8 p-8")
         with container:
@@ -365,7 +371,8 @@ class Session:
             ui.spinner(size="lg")
             user_list = []
             try:
-                user_list = await self.src_org.fetch_users()
+                assert isinstance(self.src_org, Org)
+                user_list = await self.src_org.get_users()
             except MissingAdminSDKError as e:
                 self.show_admin_sdk_error(e)
                 return
@@ -439,7 +446,7 @@ class Session:
                                 f"Expected SharedDrive instance, got {type(drive)}. Skipping."
                             )
                             continue
-                        if drive.migrated:
+                        if drive.migrated and self.user_settings.get('skip_migrated', True):
                             logging.info(f"Drive {drive} already migrated, skipping.")
                             continue
                         drive_name = str(drive)
@@ -505,6 +512,54 @@ class Session:
                 ).props("outline color=blue-500")
                 ui.button("Continue", on_click=handle_continue).props("elevated")
 
+    @ui.refreshable
+    def _render_individual_progress(self, data: dict, error_callback: callable):
+        for drive_name in data:
+            if drive_name == "personal" and not self.migrator.migrate_personal_drive:
+                #don't render inactive personal drive
+                continue
+            d = data[drive_name]
+            name = d.get("name", "Unknown")
+            total = d.get("num_files", 0)
+            migrated = d.get("num_migrated_files", 0)
+            status = d.get("status_message", "")
+            failed = d.get("failed_files", [])
+            pct = (migrated / total) if total > 0 else 0.0
+            time_s = round(d.get("time_remaining", 0))
+            with (
+                ui.card().classes("w-full p-6 shadow-sm"),
+                ui.row().classes("w-full items-center justify-between no-wrap"),
+            ):
+                with ui.column().classes("flex-grow"):
+                    ui.label(name).classes("text-lg font-medium")
+                    ui.label(status).classes("text-xs text-grey-500")
+                    if failed:
+                        ui.button(
+                            f"View {len(failed)} Failures",
+                            on_click=error_callback(failed),
+                            icon="report_problem",
+                        ).props("flat color=red size=sm")
+                if "indexing" in status.lower():
+                    ui.spinner(size="md", type="gears").classes("ml-2")
+                elif "complete" in status.lower():
+                    ui.icon("check_circle", color="green").classes(
+                        "text-2xl ml-2"
+                    )
+                else:
+                    # Progress Stats
+                    with ui.column().classes("items-end w-48"):
+                        ui.label(f"{migrated:,} / {total:,}").classes(
+                            "text-sm font-mono"
+                        )
+                        ui.linear_progress(value=pct, show_value=False).classes(
+                            "w-full h-1.5"
+                        )
+                        if time_s > 1:
+                            ui.label(
+                                f"About {str(timedelta(seconds=time_s))} Remaining"
+                            ).classes("text-xs text-grey-500")
+
+
     async def render_single_progress(self):
         container = ui.column().classes("w-full items-center gap-6 p-8")
 
@@ -527,70 +582,26 @@ class Session:
             ui.notify("Migration Cancelled", type="warning")
             # Clean up UI or redirect
             prog_timer.deactivate()
-            reset_btn.set_enabled(True)
 
         @ui.refreshable
         def render_progress():
-            # TODO update to new progress dict format
-            drive_progress = self.migrator.poll_progress()
+            drive_progress = self.migrator.poll_progress().get(self.migrator.targets[0].src_user.user_name)
+            if not drive_progress:
+                logging.error("Failed to fetch user progress stats!")
+                return
             with ui.column().classes("w-full max-w-4xl gap-4"):
-                for d in drive_progress:
-                    name = d.get("name", "Unknown")
-                    total = d.get("num_files", 0)
-                    migrated = d.get("num_migrated_files", 0)
-                    status = d.get("status_message", "")
-                    failed = d.get("failed_files", [])
-                    pct = (migrated / total) if total > 0 else 0.0
-                    time_s = round(d.get("time_remaining", 0))
-                    with (
-                        ui.card().classes("w-full p-6 shadow-sm"),
-                        ui.row().classes("w-full items-center justify-between no-wrap"),
-                    ):
-                        # Drive Info
-                        with ui.column().classes("flex-grow"):
-                            ui.label(name).classes("text-lg font-medium")
-                            ui.label(status).classes("text-xs text-grey-500")
-                            if failed:
-                                ui.button(
-                                    f"View {len(failed)} Failures",
-                                    on_click=lambda f=failed: show_errors(f),
-                                    icon="report_problem",
-                                ).props("flat color=red size=sm")
-                        if "indexing" in status.lower():
-                            ui.spinner(size="md", type="gears").classes("ml-2")
-                        elif "complete" in status.lower():
-                            ui.icon("check_circle", color="green").classes(
-                                "text-2xl ml-2"
-                            )
-                        else:
-                            # Progress Stats
-                            with ui.column().classes("items-end w-48"):
-                                ui.label(f"{migrated:,} / {total:,}").classes(
-                                    "text-sm font-mono"
-                                )
-                                ui.linear_progress(value=pct, show_value=False).classes(
-                                    "w-full h-1.5"
-                                )
-                                if time_s > 1:
-                                    ui.label(
-                                        f"About {str(timedelta(seconds=time_s))} Remaining"
-                                    ).classes("text-xs text-grey-500")
+                self._render_individual_progress(data=drive_progress, error_callback=show_errors)
 
         with container:
             ui.label("Active Migration").classes("text-h4 font-light")
             render_progress()
             with ui.row().classes("w-full justify-center"):
-                reset_btn = (
-                    ui.button(
-                        "Start Over",
-                        on_click=lambda: self.go_to(Stage.SINGLE_SETUP_DRIVES),
-                        icon="replay",
-                    )
-                    .props("outline color=blue")
-                    .bind_enabled_from(
-                        self.migrator, "initialized", backward=lambda v: not v
-                    )
-                )
+                ui.button(
+                    "Start Over",
+                    on_click=lambda: self.go_to(Stage.SINGLE_SETUP_DRIVES),
+                    icon="replay",
+                ).props("outline color=blue")
+
                 ui.button(
                     "Cancel Migration", on_click=cancel_migration, icon="stop"
                 ).props("outline color=red")
@@ -613,35 +624,35 @@ class Session:
         file = await e.file.json()
         try:
             tmp = Org(file)
-        except ValueError as e:
+        except ValueError as err:
             ui.notify("Invalid keyfile. Please try again.", type='negative')
-            logging.warning(f"Ingest keyfile failed! {e}")
+            logging.warning(f"Ingest keyfile failed! {err}")
             return
-        except KeyError as e:
+        except KeyError as err:
             ui.notify("Keyfile is malformed!", type='negative')
-            logging.warning(f"Rejected keyfile due to {e}")
+            logging.warning(f"Rejected keyfile due to {err}")
         if is_src:
             self.src_org = tmp
             try:
                 self.src_org.set_admin(self.src_domain_admin)
-            except ValueError as e:
+            except ValueError as err:
                 ui.notify(
                     "Invalid domain! Check domain format and try again.",
                     type="negative",
                 )
-                logging.warning(f"Set source domain failed! Error: {e}")
+                logging.warning(f"Set source domain failed! Error: {err}")
                 self.src_org = None
                 self.src_domain_admin = ""
         else:
             self.dst_org = tmp
             try:
                 self.dst_org.set_admin(self.dst_domain_admin)
-            except ValueError as e:
+            except ValueError as err:
                 ui.notify(
                     "Invalid domain! Check domain format and try again.",
                     type="negative",
                 )
-                logging.warning(f"Set destination domain failed! Error: {e}")
+                logging.warning(f"Set destination domain failed! Error: {err}")
                 self.dst_org = None
                 self.dst_domain_admin = ""
 
