@@ -24,7 +24,7 @@ from backend import (
 
 load_dotenv()
 
-VERSION = "3.0.1-alpha03"
+VERSION = "3.0.1β"
 
 class Stage(Enum):
     AUTH_SETUP = 0
@@ -46,7 +46,7 @@ class Session:
         self.src_domain_admin = os.getenv("SRC_ADMIN_EMAIL", "")
         self.dst_org = None
         self.dst_domain_admin = os.getenv("DST_ADMIN_EMAIL", "")
-        self.migrator = Migrator()
+        self.migrator = Migrator(max_concurrent = 20)
         ui.timer(1, self.render_footer.refresh)
         self.user_settings = {
             "allow_downloads": False,
@@ -546,6 +546,7 @@ class Session:
                         "progress_text": "0 / 0",
                         "pct": 0.0,
                         "time_text": "",
+                        "time_s": 0,
                         "has_time": False,
                     }
 
@@ -563,6 +564,7 @@ class Session:
                 d_state["progress_text"] = f"{mig:,} / {total:,}"
 
                 time_s = round(drive_data.get("time_remaining", 0))
+                d_state["time_s"] = time_s
                 d_state["time_text"] = (
                     f"About {str(timedelta(seconds=time_s))} Remaining"
                     if time_s > 1
@@ -580,23 +582,20 @@ class Session:
                 d_state["failure_text"] = f"View {len(failed)} Failures"
 
             # User-level computed fields (for multi-progress summaries)
-            statuses = [
-                ds.get("status_message", "") for ds in user_state["drives"].values()
-            ]
-            joined = " ".join(statuses).lower()
-            user_state["is_indexing"] = "indexing" in joined
-            user_state["is_working"] = any("in progress" in s.lower() for s in statuses)
+            statuses = [ds.get("status_message", "") for ds in user_state["drives"].values()]
+            user_state["is_indexing"] = any("indexing" in s.lower() for s in statuses)
+            user_state["is_working"] = any("in progress" in s.lower() for s in statuses) and not user_state["is_indexing"]
             user_state["is_complete"] = all(
                 "complete" in s.lower() for s in statuses
             ) and bool(statuses)
             user_state["is_idle"] = (
                 not user_state["is_indexing"] and not user_state["is_working"] and not user_state["is_complete"]
             )
-            time_s = round(max([ds.get("time_remaining", 0) for ds in user_state["drives"].values()]))
+            time_s = round(max([ds.get("time_s", 0) for ds in user_state["drives"].values()]))
             user_state["time_text"] = (
                     f"About {str(timedelta(seconds=time_s))} Remaining"
-                    if time_s > 1 and not user_state["is_indexing"] # Wait for all drives to finish indexing
-                    else ""
+                    if time_s > 1
+                    else "Estimating time remaining..."
                 )
         return state
 
@@ -753,7 +752,7 @@ class Session:
         state = self._update_bindable_state({}, raw_data)
 
         with container:
-            ui.label("Active Batch Migration").classes("text-h4 font-light")
+            ui.label("Active Migration").classes("text-h4 font-light")
 
             with ui.column().classes("w-full max-w-4xl gap-4"):
                 for person in self.migrator.targets:
@@ -795,23 +794,22 @@ class Session:
 
                             return _open
 
+                        # Data-bound status icons mapped to the user aggregate state
+                        # gear state for indexing, normal spinner for working
+                        with ui.column().classes("items-center"):
+                            ui.spinner(size="md", type="gears").classes("ml-2").bind_visibility_from(user_state, "is_indexing")
+                            ui.spinner(size="md").classes("ml-2").bind_visibility_from(user_state, "is_working")
+                            # ui.label().classes("text-xs text-grey-500").bind_text_from(
+                            #     user_state, "time_text").bind_visibility_from(user_state, "is_working") # Disabled until I can fix time extimation
+                            ui.icon("check_circle", color="green").classes(
+                                "text-2xl ml-2"
+                            ).bind_visibility_from(user_state, "is_complete")
+                            ui.icon("hourglass_empty").classes(
+                                "text-2xl ml-2"
+                            ).bind_visibility_from(user_state, "is_idle")
                         ui.button("View Drives", on_click=_make_open_dialog()).props(
                             "flat"
                         )
-
-                        # Data-bound status icons mapped to the user aggregate state
-                        # gear state for indexing, normal spinner for working
-                        ui.spinner(size="md", type="gears").classes("ml-2").bind_visibility_from(user_state, "is_indexing")
-                        with ui.column().classes("flex-grow"):
-                            ui.spinner(size="md").classes("ml-2").bind_visibility_from(user_state, "is_working")
-                            ui.label().classes("text-xs text-grey-500").bind_text_from(
-                                user_state, "time_text").bind_visibility_from(user_state, "is_working")
-                        ui.icon("check_circle", color="green").classes(
-                            "text-2xl ml-2"
-                        ).bind_visibility_from(user_state, "is_complete")
-                        ui.icon("hourglass_empty").classes(
-                            "text-2xl ml-2"
-                        ).bind_visibility_from(user_state, "is_idle")
 
             with ui.row().classes("w-full justify-center"):
                 ui.button(
@@ -1149,7 +1147,7 @@ if __name__ in {"__main__", "__mp_main__"}:
             storage_secret="supersecret",
             reload=False,
             native=False,
-            favicon="icon.png",
+            favicon="images/icon-small.png",
             host="127.0.0.1",
         )
     except KeyboardInterrupt:
