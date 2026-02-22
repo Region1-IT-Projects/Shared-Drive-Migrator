@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import multiprocessing
 import os
@@ -9,8 +10,7 @@ from io import BytesIO
 import pandas as pd
 import requests
 from dotenv import load_dotenv
-from nicegui import events, run, ui
-import asyncio
+from nicegui import events, ui
 
 from backend import (
     Migrator,
@@ -104,6 +104,8 @@ class Session:
                 await self.render_single_finished()
             case Stage.BATCH_SETUP:
                 await self.render_multi_setup()
+            case Stage.BATCH_PROGRESS:
+                await self.render_multi_progress()
             case _:
                 ui.label("This stage is not implemented yet!").classes("text-red-500")
 
@@ -513,52 +515,85 @@ class Session:
                 ).props("outline color=blue-500")
                 ui.button("Continue", on_click=handle_continue).props("elevated")
 
-    @ui.refreshable
-    def _render_individual_progress(self, data: dict, error_callback: callable):
-        for drive_name in data:
+    def _update_bindable_state(self, state: dict, raw_data: dict) -> dict:
+        """
+        Computes derived values (percentages, text labels, booleans) and updates
+        the reactive state dictionary so the UI bindings update automatically.
+        """
+        for user, user_data in raw_data.items():
+            if user not in state:
+                state[user] = {'drives': {}, 'is_indexing': True, 'is_complete': False, 'is_idle': False}
+
+            user_state = state[user]
+            for drive, drive_data in user_data.items():
+                if drive not in user_state['drives']:
+                    user_state['drives'][drive] = {
+                        'name': 'Unknown', 'status_message': '', 'failed_files': [],
+                        'has_failures': False, 'failure_text': '', 'is_indexing': True,
+                        'is_complete': False, 'is_progressing': False, 'progress_text': '0 / 0',
+                        'pct': 0.0, 'time_text': '', 'has_time': False
+                    }
+
+                d_state = user_state['drives'][drive]
+                d_state['name'] = drive_data.get('name', 'Unknown')
+                d_state['status_message'] = status = drive_data.get('status_message', '')
+                d_state['failed_files'] = failed = drive_data.get('failed_files', [])
+
+                # Progress Computations
+                total = drive_data.get("num_files", 0)
+                mig = drive_data.get("num_migrated_files", 0)
+                d_state['pct'] = (mig / total) if total > 0 else 0.0
+                d_state['progress_text'] = f"{mig:,} / {total:,}"
+
+                time_s = round(drive_data.get("time_remaining", 0))
+                d_state['time_text'] = f"About {str(timedelta(seconds=time_s))} Remaining" if time_s > 1 else ""
+                d_state['has_time'] = time_s > 1
+
+                # Status Booleans for Visibility Bindings
+                d_state['is_indexing'] = "indexing" in status.lower()
+                d_state['is_complete'] = "complete" in status.lower()
+                d_state['is_progressing'] = not d_state['is_indexing'] and not d_state['is_complete']
+                d_state['has_failures'] = bool(failed)
+                d_state['failure_text'] = f"View {len(failed)} Failures"
+
+            # User-level computed fields (for multi-progress summaries)
+            statuses = [ds.get("status_message", "") for ds in user_state['drives'].values()]
+            joined = " ".join(statuses).lower()
+            user_state['is_indexing'] = "indexing" in joined or any("in progress" in s.lower() for s in statuses)
+            user_state['is_complete'] = all("complete" in s.lower() for s in statuses) and bool(statuses)
+            user_state['is_idle'] = not user_state['is_indexing'] and not user_state['is_complete']
+        return state
+
+    def _render_individual_progress(self, user_drives_state: dict, error_callback: callable):
+        for drive_name, d_state in user_drives_state.items():
             if drive_name == "personal" and not self.migrator.migrate_personal_drive:
-                #don't render inactive personal drive
                 continue
-            d = data[drive_name]
-            name = d.get("name", "Unknown")
-            total = d.get("num_files", 0)
-            migrated = d.get("num_migrated_files", 0)
-            status = d.get("status_message", "")
-            failed = d.get("failed_files", [])
-            pct = (migrated / total) if total > 0 else 0.0
-            time_s = round(d.get("time_remaining", 0))
-            with (
-                ui.card().classes("w-full p-6 shadow-sm"),
-                ui.row().classes("w-full items-center justify-between no-wrap"),
-            ):
+
+            with ui.card().classes("w-full p-6 shadow-sm"), ui.row().classes("w-full items-center justify-between no-wrap"):
                 with ui.column().classes("flex-grow"):
-                    ui.label(name).classes("text-lg font-medium")
-                    ui.label(status).classes("text-xs text-grey-500")
-                    if failed:
-                        ui.button(
-                            f"View {len(failed)} Failures",
-                            on_click=error_callback(failed),
-                            icon="report_problem",
-                        ).props("flat color=red size=sm")
-                if "indexing" in status.lower():
-                    ui.spinner(size="md", type="gears").classes("ml-2")
-                elif "complete" in status.lower():
-                    ui.icon("check_circle", color="green").classes(
-                        "text-2xl ml-2"
-                    )
-                else:
-                    # Progress Stats
-                    with ui.column().classes("items-end w-48"):
-                        ui.label(f"{migrated:,} / {total:,}").classes(
-                            "text-sm font-mono"
-                        )
-                        ui.linear_progress(value=pct, show_value=False).classes(
-                            "w-full h-1.5"
-                        )
-                        if time_s > 1:
-                            ui.label(
-                                f"About {str(timedelta(seconds=time_s))} Remaining"
-                            ).classes("text-xs text-grey-500")
+                    ui.label().classes("text-lg font-medium").bind_text_from(d_state, "name")
+                    ui.label().classes("text-xs text-grey-500").bind_text_from(d_state, "status_message")
+                    ui.button(
+                        icon="report_problem",
+                        # Using default arg `d=d_state` prevents late-binding issues in loops
+                        on_click=lambda d=d_state: error_callback(d.get("failed_files", []))
+                    ).props("flat color=red size=sm") \
+                     .bind_text_from(d_state, "failure_text") \
+                     .bind_visibility_from(d_state, "has_failures")
+
+                ui.spinner(size="md", type="gears").classes("ml-2") \
+                    .bind_visibility_from(d_state, "is_indexing")
+
+                ui.icon("check_circle", color="green").classes("text-2xl ml-2") \
+                    .bind_visibility_from(d_state, "is_complete")
+
+                # Progress Stats
+                with ui.column().classes("items-end w-48").bind_visibility_from(d_state, "is_progressing"):
+                    ui.label().classes("text-sm font-mono").bind_text_from(d_state, "progress_text")
+                    ui.linear_progress(show_value=False).classes("w-full h-1.5").bind_value_from(d_state, "pct")
+                    ui.label().classes("text-xs text-grey-500") \
+                        .bind_text_from(d_state, "time_text") \
+                        .bind_visibility_from(d_state, "has_time")
 
     async def render_single_progress(self):
         container = ui.column().classes("w-full items-center gap-6 p-8")
@@ -580,40 +615,127 @@ class Session:
         async def cancel_migration():
             self.migrator.abort()
             ui.notify("Migration Cancelled", type="warning")
-            # Clean up UI or redirect
             prog_timer.deactivate()
 
-        @ui.refreshable
-        def render_progress():
-            drive_progress = self.migrator.poll_progress().get(self.migrator.targets[0].src_user.user_name)
-            if not drive_progress:
-                logging.error("Failed to fetch user progress stats!")
-                return
-            with ui.column().classes("w-full max-w-4xl gap-4"):
-                self._render_individual_progress(data=drive_progress, error_callback=show_errors)
+        ui.notify("Initializing migration stats...", type="info")
+
+        raw_data = {}
+        for _ in range(15):
+            raw_data = self.migrator.poll_progress()
+            if raw_data:
+                break
+            await asyncio.sleep(1.0)
+
+        # Create the initial bindable state dict
+        state = self._update_bindable_state({}, raw_data)
+        src_name = self.migrator.targets[0].src_user.user_name
+        user_state = state.get(src_name, {'drives': {}})
 
         with container:
             ui.label("Active Migration").classes("text-h4 font-light")
-            render_progress()
-            with ui.row().classes("w-full justify-center"):
-                ui.button(
-                    "Start Over",
-                    on_click=lambda: self.go_to(Stage.SINGLE_SETUP_DRIVES),
-                    icon="replay",
-                ).props("outline color=blue")
+            with ui.column().classes("w-full max-w-4xl gap-4"):
+                self._render_individual_progress(user_drives_state=user_state['drives'], error_callback=show_errors)
 
-                ui.button(
-                    "Cancel Migration", on_click=cancel_migration, icon="stop"
-                ).props("outline color=red")
+            with ui.row().classes("w-full justify-center"):
+                ui.button("Start Over", on_click=lambda: self.go_to(Stage.SINGLE_SETUP_ACCT), icon="replay").props("outline color=blue")
+                ui.button("Cancel Migration", on_click=cancel_migration, icon="stop").props("outline color=red")
 
         def _tick():
-            render_progress.refresh()
+            # Update the underlying dict; bindings auto-update the UI without flickering
+            current_data = self.migrator.poll_progress()
+            if current_data:
+                self._update_bindable_state(state, current_data)
 
         prog_timer = ui.timer(1.0, _tick)
         res = await self.migrator.perform_migration()
+        prog_timer.deactivate()
+        _tick() # Ensure UI reflects 100% completion
+
         logging.debug(f"Migration completed with result: {res}")
         with container:
             ui.label("Migration Complete!").classes("text-h4 text-green-600")
+
+    async def render_multi_progress(self):
+        container = ui.column().classes("w-full items-center gap-6 p-8")
+
+        # Reusable Failed Files Dialog Setup
+        with ui.dialog() as error_dialog, ui.card().classes("w-[500px]"):
+            ui.label("Failed Files").classes("text-lg font-bold")
+            with ui.scroll_area().classes("h-64 border p-2 w-full"):
+                error_list_container = ui.column().classes("gap-1")
+            ui.button("Close", on_click=error_dialog.close).classes("self-end")
+
+        def show_errors(files):
+            error_list_container.clear()
+            with error_list_container:
+                for f in files:
+                    ui.label(str(f)).classes("text-xs text-red-700 font-mono")
+            error_dialog.open()
+
+        async def cancel_migration():
+            self.migrator.abort()
+            ui.notify("Migration Cancelled", type="warning")
+            prog_timer.deactivate()
+
+        # Poll for initial payload to establish state definitions
+        raw_data = {}
+        for _ in range(15):
+            raw_data = self.migrator.poll_progress()
+            if raw_data:
+                break
+            await asyncio.sleep(1.0)
+
+        state = self._update_bindable_state({}, raw_data)
+
+        with container:
+            ui.label("Active Batch Migration").classes("text-h4 font-light")
+
+            with ui.column().classes("w-full max-w-4xl gap-4"):
+                for person in self.migrator.targets:
+                    src_name = person.src_user.user_name
+                    user_state = state.get(src_name)
+                    if not user_state:
+                        continue
+
+                    with ui.card().classes("w-full p-4 shadow-sm"), ui.row().classes("w-full items-center justify-between no-wrap"):
+                        with ui.column().classes("flex-grow"):
+                            ui.label(src_name).classes("text-lg font-medium")
+                            ui.label(f"Drives: {len(user_state['drives'])}").classes("text-xs text-grey-500")
+
+                        def _make_open_dialog(u_state=user_state, display_name_local=src_name):
+                            async def _open():
+                                with ui.dialog().classes("max-w-3xl") as dlg, ui.card().classes("p-4 w-full"):
+                                    ui.label(f"Drives for {display_name_local}").classes("text-h6")
+                                    with ui.column().classes("w-full gap-3 mt-2"):
+                                        self._render_individual_progress(user_drives_state=u_state['drives'], error_callback=show_errors)
+                                    ui.button("Close", on_click=dlg.close).classes("self-end mt-4")
+                                dlg.open()
+                            return _open
+
+                        ui.button("View Drives", on_click=_make_open_dialog()).props("flat")
+
+                        # Data-bound status icons mapped to the user aggregate state
+                        ui.spinner(size="md").classes("ml-2").bind_visibility_from(user_state, 'is_indexing')
+                        ui.icon("check_circle", color="green").classes("text-2xl ml-2").bind_visibility_from(user_state, 'is_complete')
+                        ui.icon("hourglass_empty").classes("text-2xl ml-2").bind_visibility_from(user_state, 'is_idle')
+
+            with ui.row().classes("w-full justify-center"):
+                ui.button("Start Over", on_click=lambda: self.go_to(Stage.BATCH_SETUP), icon="replay").props("outline color=blue")
+                ui.button("Cancel Migration", on_click=cancel_migration, icon="stop").props("outline color=red")
+
+        def _tick():
+            current_data = self.migrator.poll_progress()
+            if current_data:
+                self._update_bindable_state(state, current_data)
+
+        prog_timer = ui.timer(1.0, _tick)
+        res = await self.migrator.perform_migration()
+        prog_timer.deactivate()
+        _tick()
+
+        logging.debug(f"Batch migration completed with result: {res}")
+        with container:
+            ui.label("Batch Migration Complete!").classes("text-h4 text-green-600")
 
     async def render_multi_setup(self):
         user_data: list[dict] = []
@@ -692,7 +814,7 @@ class Session:
                     ).props('flat bordered accept=".csv,.xlsx,.json"')
                     ui.label("Upload a file listing source and destination accounts. Acceptable formats are: Excel, CSV, and json.").classes("text-xs text-grey-500")
 
-        def handle_continue():
+        async def handle_continue():
             nonlocal is_working, options, user_data
             is_working = True
             ui_container.refresh()
@@ -707,12 +829,13 @@ class Session:
         with ui.column().classes("w-full items-center gap-6 p-8"):
             ui.label("User Setup").classes("text-h4 font-light")
             await ui_container()
-            with ui.row().classes("w-full items-center justify-end gap-4"):
-                ui.switch("Personal Drives").bind_value(options, 'personal')
-                ui.switch("Team Drives").bind_value(options, 'shared')
-            with ui.row().classes("w-full items-center justify-end gap-4"):
-                ui.button("Back", on_click=lambda: self.go_to(Stage.MODE_SELECT)).props("outline color=blue-500")
-                ui.button("Continue", on_click=handle_continue).props("elevated")
+            with ui.card(align_items='center'):
+                with ui.row().classes("w-full items-center justify-end gap-4"):
+                    ui.switch("Personal Drives").bind_value(options, 'personal')
+                    ui.switch("Team Drives").bind_value(options, 'shared')
+                with ui.row().classes("w-full items-center justify-end gap-4"):
+                    ui.button("Back", on_click=lambda: self.go_to(Stage.MODE_SELECT)).props("outline color=blue-500")
+                    ui.button("Continue", on_click=handle_continue).props("elevated")
 
 
 # ----- Auth Specific Helpers ------
