@@ -6,7 +6,7 @@ import uuid
 from datetime import timedelta
 from enum import Enum
 from io import BytesIO
-
+from icon import get_icon_base64
 import pandas as pd
 import requests
 from dotenv import load_dotenv
@@ -1138,7 +1138,6 @@ async def main_view():
             close_button=True,
         )
 
-
 if __name__ in {"__main__", "__mp_main__"}:
     # don't fork bomb in pyinstaller version
     multiprocessing.freeze_support()
@@ -1147,7 +1146,7 @@ if __name__ in {"__main__", "__mp_main__"}:
             storage_secret="supersecret",
             reload=False,
             native=False,
-            favicon="images/icon-small.png",
+            favicon=get_icon_base64(),
             host="127.0.0.1",
         )
     except KeyboardInterrupt:
