@@ -10,7 +10,7 @@ from io import BytesIO
 import pandas as pd
 import requests
 from dotenv import load_dotenv
-from nicegui import events, ui
+from nicegui import app, events, ui
 
 from backend import (
     Migrator,
@@ -24,44 +24,7 @@ from backend import (
 
 load_dotenv()
 
-VERSION = "3.0.1-alpha02"
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-logging.getLogger("nicegui").setLevel(logging.WARNING)
-
-
-def check_github_new_version() -> bool:
-    try:
-        res = requests.get(
-            "https://api.github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator/releases/latest"
-        )
-    except requests.exceptions.HTTPError:
-        logging.warning("Failed to check for new version on GitHub.")
-        return False
-    if res.status_code == 200:
-        latest_version = res.json().get("tag_name", "")
-        if latest_version and latest_version > VERSION:
-            return True
-    return False
-
-
-@ui.page("/", title="Drive Migration Wizard")
-async def main_view():
-    session = Session()
-    session.render_header()
-    await session.router()
-    session.footer_shell()
-    if check_github_new_version():
-        ui.notify(
-            "A new version of the Drive Migration Wizard is available! Check the GitHub releases page for details.",
-            type="info",
-            timeout=10000,
-            close_button=True,
-        )
-
+VERSION = "3.0.1-alpha03"
 
 class Stage(Enum):
     AUTH_SETUP = 0
@@ -90,6 +53,7 @@ class Session:
             "max_size": 500,
             "skip_migrated": True,
         }
+        logging.debug(f"Created new session {self.id}")
 
     @ui.refreshable
     async def router(self):
@@ -564,6 +528,7 @@ class Session:
                     "is_indexing": True,
                     "is_complete": False,
                     "is_idle": False,
+                    "time_text": "",
                 }
 
             user_state = state[user]
@@ -619,15 +584,20 @@ class Session:
                 ds.get("status_message", "") for ds in user_state["drives"].values()
             ]
             joined = " ".join(statuses).lower()
-            user_state["is_indexing"] = "indexing" in joined or any(
-                "in progress" in s.lower() for s in statuses
-            )
+            user_state["is_indexing"] = "indexing" in joined
+            user_state["is_working"] = any("in progress" in s.lower() for s in statuses)
             user_state["is_complete"] = all(
                 "complete" in s.lower() for s in statuses
             ) and bool(statuses)
             user_state["is_idle"] = (
-                not user_state["is_indexing"] and not user_state["is_complete"]
+                not user_state["is_indexing"] and not user_state["is_working"] and not user_state["is_complete"]
             )
+            time_s = round(max([ds.get("time_remaining", 0) for ds in user_state["drives"].values()]))
+            user_state["time_text"] = (
+                    f"About {str(timedelta(seconds=time_s))} Remaining"
+                    if time_s > 1 and not user_state["is_indexing"] # Wait for all drives to finish indexing
+                    else ""
+                )
         return state
 
     def _render_individual_progress(
@@ -830,9 +800,12 @@ class Session:
                         )
 
                         # Data-bound status icons mapped to the user aggregate state
-                        ui.spinner(size="md").classes("ml-2").bind_visibility_from(
-                            user_state, "is_indexing"
-                        )
+                        # gear state for indexing, normal spinner for working
+                        ui.spinner(size="md", type="gears").classes("ml-2").bind_visibility_from(user_state, "is_indexing")
+                        with ui.column().classes("flex-grow"):
+                            ui.spinner(size="md").classes("ml-2").bind_visibility_from(user_state, "is_working")
+                            ui.label().classes("text-xs text-grey-500").bind_text_from(
+                                user_state, "time_text").bind_visibility_from(user_state, "is_working")
                         ui.icon("check_circle", color="green").classes(
                             "text-2xl ml-2"
                         ).bind_visibility_from(user_state, "is_complete")
@@ -977,10 +950,10 @@ class Session:
             ui.label("User Setup").classes("text-h4 font-light")
             await ui_container()
             with ui.card(align_items="center"):
-                with ui.row().classes("w-full items-center justify-end gap-4"):
+                with ui.row().classes("w-full items-center justify-center gap-4"):
                     ui.switch("Personal Drives").bind_value(options, "personal")
                     ui.switch("Team Drives").bind_value(options, "shared")
-                with ui.row().classes("w-full items-center justify-end gap-4"):
+                with ui.row().classes("w-full items-center justify-center gap-4"):
                     ui.button(
                         "Back", on_click=lambda: self.go_to(Stage.MODE_SELECT)
                     ).props("outline color=blue-500")
@@ -1130,6 +1103,43 @@ class Session:
             self.dst_org = None
         self.router.refresh()
 
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logging.getLogger("nicegui").setLevel(logging.WARNING)
+
+
+def check_github_new_version() -> bool:
+    try:
+        res = requests.get(
+            "https://api.github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator/releases/latest"
+        )
+    except requests.exceptions.HTTPError:
+        logging.warning("Failed to check for new version on GitHub.")
+        return False
+    if res.status_code == 200:
+        latest_version = res.json().get("tag_name", "")
+        if latest_version and latest_version > VERSION:
+            return True
+    return False
+
+
+@ui.page("/", title="Drive Migration Wizard")
+async def main_view():
+    await ui.context.client.connected()
+    session = Session()
+    session.render_header()
+    await session.router()
+    session.footer_shell()
+    if check_github_new_version():
+        ui.notify(
+            "A new version of the Drive Migration Wizard is available! Check the GitHub releases page for details.",
+            type="info",
+            timeout=10000,
+            close_button=True,
+        )
+
 
 if __name__ in {"__main__", "__mp_main__"}:
     # don't fork bomb in pyinstaller version
@@ -1144,7 +1154,7 @@ if __name__ in {"__main__", "__mp_main__"}:
         )
     except KeyboardInterrupt:
         logging.info("Goodbye")
-        exit(0)
+        app.shutdown()
     except Exception as e:
         logging.error(f"Process failed: {e}")
         # keep the script window open on a crash for diagnosis
