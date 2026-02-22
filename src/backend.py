@@ -546,6 +546,8 @@ class User:
 
 class Person:
     def __init__(self, source_user: User, dest_user: User):
+        if not isinstance(source_user, User) or not isinstance(dest_user, User):
+            raise TypeError("Expected a User object")
         self.src_user = source_user
         self.dst_user = dest_user
         self.to_migrate: list[SharedDrive] = []
@@ -555,7 +557,7 @@ class Person:
     def set_max_download_size(self, size: int):
         self.max_download_size = size
 
-    async def generate_drive_list(self):
+    async def generate_drive_list(self, auto_set_all = False):
         """
         generate list of drives, identify duplicate names across source and destination accounts and mark for user confirmation
         """
@@ -570,6 +572,8 @@ class Person:
                     raise TypeError("Expected SharedDrive")
                 if d.name.casefold().strip() == dd.name.casefold().strip():
                     d.add_potential_successor(dd)
+        if auto_set_all:
+            self.set_drives(src_drives)
         return src_drives
 
     def set_drives(self, to_migrate: list[Drive]):

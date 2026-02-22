@@ -4,10 +4,13 @@ import os
 import uuid
 from datetime import timedelta
 from enum import Enum
+from io import BytesIO
 
+import pandas as pd
 import requests
 from dotenv import load_dotenv
-from nicegui import events, ui
+from nicegui import events, run, ui
+import asyncio
 
 from backend import (
     Migrator,
@@ -40,8 +43,6 @@ def check_github_new_version() -> bool:
         if latest_version and latest_version > VERSION:
             return True
     return False
-
-
 
 @ui.page("/", title="Drive Migration Wizard")
 async def main_view():
@@ -101,6 +102,8 @@ class Session:
                 await self.render_single_progress()
             case Stage.SINGLE_FINISHED:
                 await self.render_single_finished()
+            case Stage.BATCH_SETUP:
+                await self.render_multi_setup()
             case _:
                 ui.label("This stage is not implemented yet!").classes("text-red-500")
 
@@ -151,7 +154,6 @@ class Session:
     @ui.refreshable
     def render_footer(self):
         with ui.row().classes("w-full items-center justify-between"):
-            # TODO: api rate limit details
             ui.label(get_api_stats()).classes("text-xs")
             ui.label(f"Stage: {self.stage.name.replace('_', ' ').title()}").classes(
                 "text-xz tracking-widest"
@@ -240,8 +242,7 @@ class Session:
                     ).classes("text-sm text-grey-600 dark:text-grey-400 mt-4 h-24")
 
                     ui.space()  # Pushes the button to the bottom
-                    ui.button("Select Bulk", on_click=lambda: self.go_to(Stage.BATCH_SETUP)).props("elevated color=orange-500").classes("w-full mt-4").set_enabled(False) # TODO: re-enable when batch mode is implemented
-                    ui.tooltip("Bulk migration mode is not implemented yet")
+                    ui.button("Select Bulk", on_click=lambda: self.go_to(Stage.BATCH_SETUP)).props("elevated color=orange-500").classes("w-full mt-4")
 
     def show_admin_sdk_error(self, e: MissingAdminSDKError):
         with (
@@ -559,7 +560,6 @@ class Session:
                                 f"About {str(timedelta(seconds=time_s))} Remaining"
                             ).classes("text-xs text-grey-500")
 
-
     async def render_single_progress(self):
         container = ui.column().classes("w-full items-center gap-6 p-8")
 
@@ -615,8 +615,105 @@ class Session:
         with container:
             ui.label("Migration Complete!").classes("text-h4 text-green-600")
 
-    def render_multi_setup(self):
-        pass #TODO
+    async def render_multi_setup(self):
+        user_data: list[dict] = []
+        is_working = False
+        options = {
+            "personal": True,
+            "shared" : True
+        }
+        async def ingest_csv(evt: events.UploadEventArguments):
+            nonlocal is_working, user_data
+            is_working = True
+            ui_container.refresh()
+            file = await evt.file.read()
+            raw = BytesIO(file)
+            match evt.file.content_type:
+                case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+                    user_dataframe = pd.read_excel(raw)
+                case "text/csv":
+                    user_dataframe = pd.read_csv(raw)
+                case "application/json":
+                    user_dataframe = pd.read_json(raw)
+                case _:
+                    logging.warning(f"Got unknown file type {evt.file.content_type}")
+            logging.debug(f"Ingested DF\n{user_dataframe}")
+            rows, cols = user_dataframe.shape
+            if cols != 2:
+                logging.warning(f"Expected exacly 2 columns, got {cols}. Rejecting file")
+                ui.notify("Expected exacly 2 columns, got {cols}.", type='warning')
+                self.go_to(Stage.BATCH_SETUP)
+                return
+            user_dataframe.columns = ['src', 'dst'] # override names for consistency
+            user_dataframe = user_dataframe.map(lambda x: x.strip() if isinstance(x, str) else x)
+            dat = user_dataframe.to_dict(orient='records')
+            lookup_tasks = []
+            for entry in dat:
+                entry["src_user"] = asyncio.create_task(self.src_org.find_user_by_email(entry['src']))
+                lookup_tasks.append(entry["src_user"])
+                entry["dst_user"] = asyncio.create_task(self.dst_org.find_user_by_email(entry['dst']))
+                lookup_tasks.append(entry["dst_user"])
+            await asyncio.gather(*lookup_tasks, return_exceptions=True)
+            for entry in dat:
+                src = entry.pop("src_user").result()
+                dst = entry.pop("dst_user").result()
+                if isinstance(src, User) and isinstance(dst, User):
+                    self.migrator.add_target(src, dst)
+                    entry["status"] = "OK"
+                else:
+                    entry["status"] = "Error"
+                    logging.error(f"Failure to init {entry}, got results {src}, {dst}")
+
+            is_working = False
+            user_data = dat
+            ui_container.refresh()
+
+        @ui.refreshable
+        async def ui_container():
+            container = ui.card(align_items='center').classes("w-full")
+            container.clear()
+            with container:
+                if is_working:
+                    ui.spinner(size='lg')
+                elif len(user_data):
+                    with ui.card().classes("w-full p-6 shadow-sm"):
+                        ui.aggrid({'columnDefs': [
+                        {'headerName': 'Source User', 'field': 'src'},
+                        {'headerName': 'Destination User', 'field': 'dst'},
+                        {'headerName': 'Status', 'field': 'status', 'cellClassRules': {
+                            'bg-red-800': 'x == "Error"',
+                            'bg-green-800': 'x == "OK"',
+                        }}], 'rowData': user_data})
+                else:
+                    ui.upload(
+                        label="Accounts File",
+                        auto_upload=True,
+                        on_upload=ingest_csv,
+                    ).props('flat bordered accept=".csv,.xlsx,.json"')
+                    ui.label("Upload a file listing source and destination accounts. Acceptable formats are: Excel, CSV, and json.").classes("text-xs text-grey-500")
+
+        def handle_continue():
+            nonlocal is_working, options, user_data
+            is_working = True
+            ui_container.refresh()
+            if options.get("shared"):
+                tasks = []
+                for person in self.migrator.targets:
+                    tasks.append(asyncio.create_task(person.generate_drive_list(True)))
+                await asyncio.gather(*tasks)
+            self.migrator.init_migration(options.get("personal"), self.user_settings)
+            self.go_to(Stage.BATCH_PROGRESS)
+
+        with ui.column().classes("w-full items-center gap-6 p-8"):
+            ui.label("User Setup").classes("text-h4 font-light")
+            await ui_container()
+            with ui.row().classes("w-full items-center justify-end gap-4"):
+                ui.switch("Personal Drives").bind_value(options, 'personal')
+                ui.switch("Team Drives").bind_value(options, 'shared')
+            with ui.row().classes("w-full items-center justify-end gap-4"):
+                ui.button("Back", on_click=lambda: self.go_to(Stage.MODE_SELECT)).props("outline color=blue-500")
+                ui.button("Continue", on_click=handle_continue).props("elevated")
+
 
 # ----- Auth Specific Helpers ------
 
@@ -637,8 +734,9 @@ class Session:
                 self.src_org.set_admin(self.src_domain_admin)
             except ValueError as err:
                 ui.notify(
-                    "Invalid domain! Check domain format and try again.",
+                    "Domain setup failed! Did you use the correct keyfile?",
                     type="negative",
+                    timeout=10000,
                 )
                 logging.warning(f"Set source domain failed! Error: {err}")
                 self.src_org = None
@@ -752,7 +850,7 @@ if __name__ in {"__main__", "__mp_main__"}:
             storage_secret="supersecret",
             reload=False,
             native=False,
-            favicon="🧙",
+            favicon="icon.png",
             host="127.0.0.1",
         )
     except KeyboardInterrupt:
