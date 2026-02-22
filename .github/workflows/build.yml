@@ -31,7 +31,7 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Build with PyInstaller 
-        run: uv run pyinstaller --noconfirm --onefile --windowed --name "DriveMigrator" --collect-all "nicegui" src/main.py
+        run: uv run pyinstaller --noconfirm --onefile --windowed --name "DriveMigrator" --collect-all "nicegui" --icon images/icon.ico src/main.py
 
       - name: Upload Binaries to Release
         uses: softprops/action-gh-release@v2
