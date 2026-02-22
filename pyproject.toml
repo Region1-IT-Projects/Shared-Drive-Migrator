@@ -1,6 +1,6 @@
 [project]
 name = "google-drive-migrator"
-version = "3.0.1"
+version = "3.0.2"
 description = "Copy personal and shared drives from one organization to another"
 readme = "README.md"
 requires-python = ">=3.12"

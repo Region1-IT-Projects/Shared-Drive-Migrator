@@ -2,11 +2,12 @@ import asyncio
 import logging
 import multiprocessing
 import os
+import tempfile
 import uuid
 from datetime import timedelta
 from enum import Enum
 from io import BytesIO
-from icon import get_icon_base64
+
 import pandas as pd
 import requests
 from dotenv import load_dotenv
@@ -21,10 +22,13 @@ from backend import (
     User,
     get_api_stats,
 )
+from icon import get_icon_base64
 
 load_dotenv()
 
-VERSION = "3.0.1"
+VERSION = "3.0.2"
+log_path = ""  # overridden by logger
+
 
 class Stage(Enum):
     AUTH_SETUP = 0
@@ -46,7 +50,7 @@ class Session:
         self.src_domain_admin = os.getenv("SRC_ADMIN_EMAIL", "")
         self.dst_org = None
         self.dst_domain_admin = os.getenv("DST_ADMIN_EMAIL", "")
-        self.migrator = Migrator(max_concurrent = 20)
+        self.migrator = Migrator(max_concurrent=20)
         ui.timer(1, self.render_footer.refresh)
         self.user_settings = {
             "allow_downloads": False,
@@ -104,6 +108,17 @@ class Session:
         self.router.refresh()
         self.render_footer.refresh()
 
+    def confirm_shutdown(self):
+        def do_shutdown():
+            ui.notify("Program Terminated")
+            app.shutdown()
+        with ui.dialog() as dialog, ui.card():
+            ui.label("Are you sure you want to quit?")
+            with ui.row().classes("items-center"):
+                ui.button("Yes", on_click=do_shutdown)
+                ui.button("No", on_click=dialog.close)
+        dialog.open()
+
     def render_header(self):
         # 'elevated' adds a shadow, 'bordered' adds a bottom line
         with ui.header(elevated=True).classes("p-4 items-center justify-between"):
@@ -112,13 +127,16 @@ class Session:
                 ui.label("Drive Migration Wizard").classes("text-xl font-bold")
 
             with ui.row().classes("items-center gap-4"):
-                ui.badge(VERSION)
                 ui.button(
                     icon="code",
                     on_click=lambda: ui.run_javascript(
                         'window.open("https://github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator", "_blank")'
                     ),
                 ).props("flat color=white").tooltip("Open GitHub Repo")
+                ui.button(
+                    icon="power_settings_new",
+                    on_click=self.confirm_shutdown,
+                ).props("flat color=white").tooltip("Terminate Program")
                 ui.button(icon="settings", on_click=self.render_options_dialog).props(
                     "flat color=white"
                 ).tooltip("Settings")
@@ -131,8 +149,9 @@ class Session:
     def render_footer(self):
         with ui.row().classes("w-full items-center justify-between"):
             ui.label(get_api_stats()).classes("text-xs")
+            ui.label(f"Logfile: {log_path}").classes("text-xs text-gray-100")
             ui.label(f"Stage: {self.stage.name.replace('_', ' ').title()}").classes(
-                "text-xz tracking-widest"
+                "text-xs"
             )
 
     def render_options_dialog(self):
@@ -582,21 +601,30 @@ class Session:
                 d_state["failure_text"] = f"View {len(failed)} Failures"
 
             # User-level computed fields (for multi-progress summaries)
-            statuses = [ds.get("status_message", "") for ds in user_state["drives"].values()]
+            statuses = [
+                ds.get("status_message", "") for ds in user_state["drives"].values()
+            ]
             user_state["is_indexing"] = any("indexing" in s.lower() for s in statuses)
-            user_state["is_working"] = any("in progress" in s.lower() for s in statuses) and not user_state["is_indexing"]
+            user_state["is_working"] = (
+                any("in progress" in s.lower() for s in statuses)
+                and not user_state["is_indexing"]
+            )
             user_state["is_complete"] = all(
                 "complete" in s.lower() for s in statuses
             ) and bool(statuses)
             user_state["is_idle"] = (
-                not user_state["is_indexing"] and not user_state["is_working"] and not user_state["is_complete"]
+                not user_state["is_indexing"]
+                and not user_state["is_working"]
+                and not user_state["is_complete"]
             )
-            time_s = round(max([ds.get("time_s", 0) for ds in user_state["drives"].values()]))
+            time_s = round(
+                max([ds.get("time_s", 0) for ds in user_state["drives"].values()])
+            )
             user_state["time_text"] = (
-                    f"About {str(timedelta(seconds=time_s))} Remaining"
-                    if time_s > 1
-                    else "Estimating time remaining..."
-                )
+                f"About {str(timedelta(seconds=time_s))} Remaining"
+                if time_s > 1
+                else "Estimating time remaining..."
+            )
         return state
 
     def _render_individual_progress(
@@ -797,8 +825,12 @@ class Session:
                         # Data-bound status icons mapped to the user aggregate state
                         # gear state for indexing, normal spinner for working
                         with ui.column().classes("items-center"):
-                            ui.spinner(size="md", type="gears").classes("ml-2").bind_visibility_from(user_state, "is_indexing")
-                            ui.spinner(size="md").classes("ml-2").bind_visibility_from(user_state, "is_working")
+                            ui.spinner(size="md", type="gears").classes(
+                                "ml-2"
+                            ).bind_visibility_from(user_state, "is_indexing")
+                            ui.spinner(size="md").classes("ml-2").bind_visibility_from(
+                                user_state, "is_working"
+                            )
                             # ui.label().classes("text-xs text-grey-500").bind_text_from(
                             #     user_state, "time_text").bind_visibility_from(user_state, "is_working") # Disabled until I can fix time extimation
                             ui.icon("check_circle", color="green").classes(
@@ -1101,10 +1133,18 @@ class Session:
             self.dst_org = None
         self.router.refresh()
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+
+with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".log") as tmp:
+    log_path = tmp.name
+
+    # 2. Configure logging to use the temp file path
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        filename=log_path,
+        filemode="w",
+        force=True,
+    )
 logging.getLogger("nicegui").setLevel(logging.WARNING)
 
 
@@ -1137,6 +1177,7 @@ async def main_view():
             timeout=10000,
             close_button=True,
         )
+
 
 if __name__ in {"__main__", "__mp_main__"}:
     # don't fork bomb in pyinstaller version
