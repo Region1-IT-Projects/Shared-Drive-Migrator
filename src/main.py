@@ -24,7 +24,7 @@ from backend import (
 
 load_dotenv()
 
-VERSION = "3.0.1β"
+VERSION = "3.0.1"
 
 class Stage(Enum):
     AUTH_SETUP = 0

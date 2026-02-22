@@ -1,9 +1,9 @@
 [project]
-name = "shared-drive-migrator"
-version = "3.0.1a0"
-description = "Add your description here"
+name = "google-drive-migrator"
+version = "3.0.1"
+description = "Copy personal and shared drives from one organization to another"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "cryptography>=46.0.4",
     "google-api-python-client>=2.188.0",
@@ -15,7 +15,6 @@ dependencies = [
     "pywebview>=6.1",
 ]
 [tool.ruff]
-# The "Happy Medium" selection
 select = [
     "E",   # pycodestyle errors (standard PEP8)
     "W",   # pycodestyle warnings

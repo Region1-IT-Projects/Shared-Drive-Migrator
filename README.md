@@ -28,9 +28,9 @@ Upon launching this script, it will open its UI in your default browser. This pr
 
 ### From Source
 
-Users can run this project directly if they have Python 3.11+ installed.
+Users can run this project directly if they have Python 3.12+ installed.
 
-This project is managed with `uv`. Assuming you have it installed, simply clone this repository and run:
+This project is managed with [`uv`](https://docs.astral.sh/uv/). Assuming you have it installed, simply clone this repository and run:
 ```bash
 uv run src/main.py
 ```
@@ -137,3 +137,8 @@ This program operates on a relatively simple process:
 6. Profit
 
 Rather than requiring each user to sign in to this wizard, we use service accounts with [domain-wide delegation](https://support.google.com/a/answer/162106?hl=en) to impersonate each user and perform the migration on their behalf.
+
+## AI Usage Disclosure
+
+AI tools were used to assist with the creation of the source code of this project, and an image generator was used to create its icon / logo. 
+<!-- I know, I am disappointed in myself too -->
