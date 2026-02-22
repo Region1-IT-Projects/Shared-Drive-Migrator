@@ -32,9 +32,12 @@ logging.basicConfig(
 )
 logging.getLogger("nicegui").setLevel(logging.WARNING)
 
+
 def check_github_new_version() -> bool:
     try:
-        res = requests.get("https://api.github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator/releases/latest")
+        res = requests.get(
+            "https://api.github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator/releases/latest"
+        )
     except requests.exceptions.HTTPError:
         logging.warning("Failed to check for new version on GitHub.")
         return False
@@ -43,6 +46,7 @@ def check_github_new_version() -> bool:
         if latest_version and latest_version > VERSION:
             return True
     return False
+
 
 @ui.page("/", title="Drive Migration Wizard")
 async def main_view():
@@ -55,7 +59,7 @@ async def main_view():
             "A new version of the Drive Migration Wizard is available! Check the GitHub releases page for details.",
             type="info",
             timeout=10000,
-            close_button=True
+            close_button=True,
         )
 
 
@@ -82,9 +86,9 @@ class Session:
         self.migrator = Migrator()
         ui.timer(1, self.render_footer.refresh)
         self.user_settings = {
-            'allow_downloads': False,
-            'max_size': 500,
-            'skip_migrated': False # for testing
+            "allow_downloads": False,
+            "max_size": 500,
+            "skip_migrated": True,
         }
 
     @ui.refreshable
@@ -121,10 +125,12 @@ class Session:
                     ui.notify(
                         "You must configure both source and destination keys before proceeding!",
                         type="negative",
+                        timeout=None,
+                        close_button=True,
                     )
                 else:
                     self.stage = Stage.MODE_SELECT
-            case Stage.SINGLE_SETUP_ACCT: #TODO: this reset for multi-account
+            case Stage.SINGLE_SETUP_ACCT:  # TODO: this reset for multi-account
                 if isinstance(self.migrator, Migrator):
                     self.migrator.targets.clear()
                 self.stage = Stage.SINGLE_SETUP_ACCT
@@ -143,11 +149,15 @@ class Session:
 
             with ui.row().classes("items-center gap-4"):
                 ui.badge(VERSION)
-                ui.button(icon='code',\
-                    on_click=lambda: ui.run_javascript('window.open("https://github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator", "_blank")')) \
-                    .props('flat color=white').tooltip('Open GitHub Repo')
-                ui.button(icon="settings", on_click=self.render_options_dialog).props("flat color=white").tooltip("Settings")
-
+                ui.button(
+                    icon="code",
+                    on_click=lambda: ui.run_javascript(
+                        'window.open("https://github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator", "_blank")'
+                    ),
+                ).props("flat color=white").tooltip("Open GitHub Repo")
+                ui.button(icon="settings", on_click=self.render_options_dialog).props(
+                    "flat color=white"
+                ).tooltip("Settings")
 
     def footer_shell(self):
         with ui.footer().classes("border-t p-2 px-8"):
@@ -162,26 +172,37 @@ class Session:
             )
 
     def render_options_dialog(self):
-        with ui.dialog() as self.settings_dialog, ui.card().style('min-width: 350px'):
-            ui.label('Application Options').classes('text-h6 mb-2')
-            with ui.column().classes('w-full gap-4'):
+        with ui.dialog() as self.settings_dialog, ui.card().style("min-width: 350px"):
+            ui.label("Application Options").classes("text-h6 mb-2")
+            with ui.column().classes("w-full gap-4"):
                 ui.switch(text="Dark Mode").bind_value(self.dark)
 
-                with ui.row().classes('items-center w-full justify-between'):
-                    download_switch = ui.switch('Allow Downloads').bind_value(self.user_settings, 'allow_downloads')
+                with ui.row().classes("items-center w-full justify-between"):
+                    download_switch = ui.switch("Allow Downloads").bind_value(
+                        self.user_settings, "allow_downloads"
+                    )
                     # Info Icon with Tooltip
-                    with ui.icon('info', size='sm').classes('text-gray-400 cursor-help'):
-                        ui.tooltip('Enables personal-drive fallback exports via download & upload to this local machine.')
-                ui.number(label='Max download size (MB)', format='%d') \
-                    .bind_value(self.user_settings, 'max_size') \
-                    .bind_visibility_from(download_switch, 'value') \
-                    .classes('w-full ml-4')
-                with ui.row().classes('items-center w-full justify-between'):
-                    ui.switch('Skip already-migrated files').bind_value(self.user_settings, 'skip_migrated')
-                    with ui.icon('info', size='sm').classes('text-gray-400 cursor-help'):
-                        ui.tooltip('This wizard invisibly marks every file it migrates. Enabling this option will skip any files that have already been migrated in previous sessions.')
-            with ui.card_actions().classes('justify-end w-full'):
-                ui.button('Close', on_click=self.settings_dialog.close).props('flat')
+                    with ui.icon("info", size="sm").classes(
+                        "text-gray-400 cursor-help"
+                    ):
+                        ui.tooltip(
+                            "Enables personal-drive fallback exports via download & upload to this local machine."
+                        )
+                ui.number(label="Max download size (MB)", format="%d").bind_value(
+                    self.user_settings, "max_size"
+                ).bind_visibility_from(download_switch, "value").classes("w-full ml-4")
+                with ui.row().classes("items-center w-full justify-between"):
+                    ui.switch("Skip already-migrated files").bind_value(
+                        self.user_settings, "skip_migrated"
+                    )
+                    with ui.icon("info", size="sm").classes(
+                        "text-gray-400 cursor-help"
+                    ):
+                        ui.tooltip(
+                            "This wizard invisibly marks every file it migrates. Enabling this option will skip any files that have already been migrated in previous sessions."
+                        )
+            with ui.card_actions().classes("justify-end w-full"):
+                ui.button("Close", on_click=self.settings_dialog.close).props("flat")
         self.settings_dialog.open()
 
     # ----- Main Renderers -------
@@ -244,7 +265,9 @@ class Session:
                     ).classes("text-sm text-grey-600 dark:text-grey-400 mt-4 h-24")
 
                     ui.space()  # Pushes the button to the bottom
-                    ui.button("Select Bulk", on_click=lambda: self.go_to(Stage.BATCH_SETUP)).props("elevated color=orange-500").classes("w-full mt-4")
+                    ui.button(
+                        "Select Bulk", on_click=lambda: self.go_to(Stage.BATCH_SETUP)
+                    ).props("elevated color=orange-500").classes("w-full mt-4")
 
     def show_admin_sdk_error(self, e: MissingAdminSDKError):
         with (
@@ -280,7 +303,7 @@ class Session:
                     self.migrator.add_target(state["src"], state["dst"])
                     continue_btn.set_enabled(True)
                 except (ValueError, TypeError) as e:
-                    ui.notify(e, type='negative')
+                    ui.notify(e, type="negative", timeout=None, close_button=True)
 
         @ui.refreshable
         def render_account_card(title: str, key: str):
@@ -333,6 +356,8 @@ class Session:
                                 ui.notify(
                                     "No user found with that email! Check the address and try again.",
                                     type="negative",
+                                    timeout=None,
+                                    close_button=True,
                                 )
                             else:
                                 state[key] = new_user  # Update the state dict
@@ -357,7 +382,10 @@ class Session:
                 except MigratorError as e:
                     logging.error(f"Error finding user: {e}")
                     ui.notify(
-                        "Error finding user! Check logs for details.", type="negative"
+                        "Error finding user! Check logs for details.",
+                        type="negative",
+                        timeout=None,
+                        close_button=True,
                     )
                     return
 
@@ -384,6 +412,8 @@ class Session:
                 ui.notify(
                     "Failed to fetch user list! Check logs for details.",
                     type="negative",
+                    timeout=None,
+                    close_button=True,
                 )
             container.clear()
             logging.debug(f"User list fetched with {len(user_list)} users")
@@ -410,11 +440,16 @@ class Session:
             ui.label("Loading drives...").classes("text-grey")
             ui.spinner(size="lg")
             try:
-                drive_list: list[SharedDrive] = await target_person.generate_drive_list()
+                drive_list: list[
+                    SharedDrive
+                ] = await target_person.generate_drive_list()
             except Exception as e:
                 logging.error(f"Failed to fetch drive list: {e}")
                 ui.notify(
-                    "Failed to fetch drives. Check logs for details.", type="negative"
+                    "Failed to fetch drives. Check logs for details.",
+                    type="negative",
+                    timeout=None,
+                    close_button=True,
                 )
                 container.clear()
                 return
@@ -449,7 +484,9 @@ class Session:
                                 f"Expected SharedDrive instance, got {type(drive)}. Skipping."
                             )
                             continue
-                        if drive.migrated and self.user_settings.get('skip_migrated', True):
+                        if drive.migrated and self.user_settings.get(
+                            "skip_migrated", True
+                        ):
                             logging.info(f"Drive {drive} already migrated, skipping.")
                             continue
                         drive_name = str(drive)
@@ -522,78 +559,128 @@ class Session:
         """
         for user, user_data in raw_data.items():
             if user not in state:
-                state[user] = {'drives': {}, 'is_indexing': True, 'is_complete': False, 'is_idle': False}
+                state[user] = {
+                    "drives": {},
+                    "is_indexing": True,
+                    "is_complete": False,
+                    "is_idle": False,
+                }
 
             user_state = state[user]
             for drive, drive_data in user_data.items():
-                if drive not in user_state['drives']:
-                    user_state['drives'][drive] = {
-                        'name': 'Unknown', 'status_message': '', 'failed_files': [],
-                        'has_failures': False, 'failure_text': '', 'is_indexing': True,
-                        'is_complete': False, 'is_progressing': False, 'progress_text': '0 / 0',
-                        'pct': 0.0, 'time_text': '', 'has_time': False
+                if drive not in user_state["drives"]:
+                    user_state["drives"][drive] = {
+                        "name": "Unknown",
+                        "status_message": "",
+                        "failed_files": [],
+                        "has_failures": False,
+                        "failure_text": "",
+                        "is_indexing": True,
+                        "is_complete": False,
+                        "is_progressing": False,
+                        "progress_text": "0 / 0",
+                        "pct": 0.0,
+                        "time_text": "",
+                        "has_time": False,
                     }
 
-                d_state = user_state['drives'][drive]
-                d_state['name'] = drive_data.get('name', 'Unknown')
-                d_state['status_message'] = status = drive_data.get('status_message', '')
-                d_state['failed_files'] = failed = drive_data.get('failed_files', [])
+                d_state = user_state["drives"][drive]
+                d_state["name"] = drive_data.get("name", "Unknown")
+                d_state["status_message"] = status = drive_data.get(
+                    "status_message", ""
+                )
+                d_state["failed_files"] = failed = drive_data.get("failed_files", [])
 
                 # Progress Computations
                 total = drive_data.get("num_files", 0)
                 mig = drive_data.get("num_migrated_files", 0)
-                d_state['pct'] = (mig / total) if total > 0 else 0.0
-                d_state['progress_text'] = f"{mig:,} / {total:,}"
+                d_state["pct"] = (mig / total) if total > 0 else 0.0
+                d_state["progress_text"] = f"{mig:,} / {total:,}"
 
                 time_s = round(drive_data.get("time_remaining", 0))
-                d_state['time_text'] = f"About {str(timedelta(seconds=time_s))} Remaining" if time_s > 1 else ""
-                d_state['has_time'] = time_s > 1
+                d_state["time_text"] = (
+                    f"About {str(timedelta(seconds=time_s))} Remaining"
+                    if time_s > 1
+                    else ""
+                )
+                d_state["has_time"] = time_s > 1
 
                 # Status Booleans for Visibility Bindings
-                d_state['is_indexing'] = "indexing" in status.lower()
-                d_state['is_complete'] = "complete" in status.lower()
-                d_state['is_progressing'] = not d_state['is_indexing'] and not d_state['is_complete']
-                d_state['has_failures'] = bool(failed)
-                d_state['failure_text'] = f"View {len(failed)} Failures"
+                d_state["is_indexing"] = "indexing" in status.lower()
+                d_state["is_complete"] = "complete" in status.lower()
+                d_state["is_progressing"] = (
+                    not d_state["is_indexing"] and not d_state["is_complete"]
+                )
+                d_state["has_failures"] = bool(failed)
+                d_state["failure_text"] = f"View {len(failed)} Failures"
 
             # User-level computed fields (for multi-progress summaries)
-            statuses = [ds.get("status_message", "") for ds in user_state['drives'].values()]
+            statuses = [
+                ds.get("status_message", "") for ds in user_state["drives"].values()
+            ]
             joined = " ".join(statuses).lower()
-            user_state['is_indexing'] = "indexing" in joined or any("in progress" in s.lower() for s in statuses)
-            user_state['is_complete'] = all("complete" in s.lower() for s in statuses) and bool(statuses)
-            user_state['is_idle'] = not user_state['is_indexing'] and not user_state['is_complete']
+            user_state["is_indexing"] = "indexing" in joined or any(
+                "in progress" in s.lower() for s in statuses
+            )
+            user_state["is_complete"] = all(
+                "complete" in s.lower() for s in statuses
+            ) and bool(statuses)
+            user_state["is_idle"] = (
+                not user_state["is_indexing"] and not user_state["is_complete"]
+            )
         return state
 
-    def _render_individual_progress(self, user_drives_state: dict, error_callback: callable):
+    def _render_individual_progress(
+        self, user_drives_state: dict, error_callback: callable
+    ):
         for drive_name, d_state in user_drives_state.items():
             if drive_name == "personal" and not self.migrator.migrate_personal_drive:
                 continue
 
-            with ui.card().classes("w-full p-6 shadow-sm"), ui.row().classes("w-full items-center justify-between no-wrap"):
+            with (
+                ui.card().classes("w-full p-6 shadow-sm"),
+                ui.row().classes("w-full items-center justify-between no-wrap"),
+            ):
                 with ui.column().classes("flex-grow"):
-                    ui.label().classes("text-lg font-medium").bind_text_from(d_state, "name")
-                    ui.label().classes("text-xs text-grey-500").bind_text_from(d_state, "status_message")
+                    ui.label().classes("text-lg font-medium").bind_text_from(
+                        d_state, "name"
+                    )
+                    ui.label().classes("text-xs text-grey-500").bind_text_from(
+                        d_state, "status_message"
+                    )
                     ui.button(
                         icon="report_problem",
                         # Using default arg `d=d_state` prevents late-binding issues in loops
-                        on_click=lambda d=d_state: error_callback(d.get("failed_files", []))
-                    ).props("flat color=red size=sm") \
-                     .bind_text_from(d_state, "failure_text") \
-                     .bind_visibility_from(d_state, "has_failures")
+                        on_click=lambda d=d_state: error_callback(
+                            d.get("failed_files", [])
+                        ),
+                    ).props("flat color=red size=sm").bind_text_from(
+                        d_state, "failure_text"
+                    ).bind_visibility_from(d_state, "has_failures")
 
-                ui.spinner(size="md", type="gears").classes("ml-2") \
-                    .bind_visibility_from(d_state, "is_indexing")
+                ui.spinner(size="md", type="gears").classes(
+                    "ml-2"
+                ).bind_visibility_from(d_state, "is_indexing")
 
-                ui.icon("check_circle", color="green").classes("text-2xl ml-2") \
-                    .bind_visibility_from(d_state, "is_complete")
+                ui.icon("check_circle", color="green").classes(
+                    "text-2xl ml-2"
+                ).bind_visibility_from(d_state, "is_complete")
 
                 # Progress Stats
-                with ui.column().classes("items-end w-48").bind_visibility_from(d_state, "is_progressing"):
-                    ui.label().classes("text-sm font-mono").bind_text_from(d_state, "progress_text")
-                    ui.linear_progress(show_value=False).classes("w-full h-1.5").bind_value_from(d_state, "pct")
-                    ui.label().classes("text-xs text-grey-500") \
-                        .bind_text_from(d_state, "time_text") \
-                        .bind_visibility_from(d_state, "has_time")
+                with (
+                    ui.column()
+                    .classes("items-end w-48")
+                    .bind_visibility_from(d_state, "is_progressing")
+                ):
+                    ui.label().classes("text-sm font-mono").bind_text_from(
+                        d_state, "progress_text"
+                    )
+                    ui.linear_progress(show_value=False).classes(
+                        "w-full h-1.5"
+                    ).bind_value_from(d_state, "pct")
+                    ui.label().classes("text-xs text-grey-500").bind_text_from(
+                        d_state, "time_text"
+                    ).bind_visibility_from(d_state, "has_time")
 
     async def render_single_progress(self):
         container = ui.column().classes("w-full items-center gap-6 p-8")
@@ -629,16 +716,24 @@ class Session:
         # Create the initial bindable state dict
         state = self._update_bindable_state({}, raw_data)
         src_name = self.migrator.targets[0].src_user.user_name
-        user_state = state.get(src_name, {'drives': {}})
+        user_state = state.get(src_name, {"drives": {}})
 
         with container:
             ui.label("Active Migration").classes("text-h4 font-light")
             with ui.column().classes("w-full max-w-4xl gap-4"):
-                self._render_individual_progress(user_drives_state=user_state['drives'], error_callback=show_errors)
+                self._render_individual_progress(
+                    user_drives_state=user_state["drives"], error_callback=show_errors
+                )
 
             with ui.row().classes("w-full justify-center"):
-                ui.button("Start Over", on_click=lambda: self.go_to(Stage.SINGLE_SETUP_ACCT), icon="replay").props("outline color=blue")
-                ui.button("Cancel Migration", on_click=cancel_migration, icon="stop").props("outline color=red")
+                ui.button(
+                    "Start Over",
+                    on_click=lambda: self.go_to(Stage.SINGLE_SETUP_ACCT),
+                    icon="replay",
+                ).props("outline color=blue")
+                ui.button(
+                    "Cancel Migration", on_click=cancel_migration, icon="stop"
+                ).props("outline color=red")
 
         def _tick():
             # Update the underlying dict; bindings auto-update the UI without flickering
@@ -649,7 +744,7 @@ class Session:
         prog_timer = ui.timer(1.0, _tick)
         res = await self.migrator.perform_migration()
         prog_timer.deactivate()
-        _tick() # Ensure UI reflects 100% completion
+        _tick()  # Ensure UI reflects 100% completion
 
         logging.debug(f"Migration completed with result: {res}")
         with container:
@@ -697,31 +792,63 @@ class Session:
                     if not user_state:
                         continue
 
-                    with ui.card().classes("w-full p-4 shadow-sm"), ui.row().classes("w-full items-center justify-between no-wrap"):
+                    with (
+                        ui.card().classes("w-full p-4 shadow-sm"),
+                        ui.row().classes("w-full items-center justify-between no-wrap"),
+                    ):
                         with ui.column().classes("flex-grow"):
                             ui.label(src_name).classes("text-lg font-medium")
-                            ui.label(f"Drives: {len(user_state['drives'])}").classes("text-xs text-grey-500")
+                            ui.label(f"Drives: {len(user_state['drives'])}").classes(
+                                "text-xs text-grey-500"
+                            )
 
-                        def _make_open_dialog(u_state=user_state, display_name_local=src_name):
+                        def _make_open_dialog(
+                            u_state=user_state, display_name_local=src_name
+                        ):
                             async def _open():
-                                with ui.dialog().classes("max-w-3xl") as dlg, ui.card().classes("p-4 w-full"):
-                                    ui.label(f"Drives for {display_name_local}").classes("text-h6")
+                                with (
+                                    ui.dialog().classes("max-w-3xl") as dlg,
+                                    ui.card().classes("p-4 w-full"),
+                                ):
+                                    ui.label(
+                                        f"Drives for {display_name_local}"
+                                    ).classes("text-h6")
                                     with ui.column().classes("w-full gap-3 mt-2"):
-                                        self._render_individual_progress(user_drives_state=u_state['drives'], error_callback=show_errors)
-                                    ui.button("Close", on_click=dlg.close).classes("self-end mt-4")
+                                        self._render_individual_progress(
+                                            user_drives_state=u_state["drives"],
+                                            error_callback=show_errors,
+                                        )
+                                    ui.button("Close", on_click=dlg.close).classes(
+                                        "self-end mt-4"
+                                    )
                                 dlg.open()
+
                             return _open
 
-                        ui.button("View Drives", on_click=_make_open_dialog()).props("flat")
+                        ui.button("View Drives", on_click=_make_open_dialog()).props(
+                            "flat"
+                        )
 
                         # Data-bound status icons mapped to the user aggregate state
-                        ui.spinner(size="md").classes("ml-2").bind_visibility_from(user_state, 'is_indexing')
-                        ui.icon("check_circle", color="green").classes("text-2xl ml-2").bind_visibility_from(user_state, 'is_complete')
-                        ui.icon("hourglass_empty").classes("text-2xl ml-2").bind_visibility_from(user_state, 'is_idle')
+                        ui.spinner(size="md").classes("ml-2").bind_visibility_from(
+                            user_state, "is_indexing"
+                        )
+                        ui.icon("check_circle", color="green").classes(
+                            "text-2xl ml-2"
+                        ).bind_visibility_from(user_state, "is_complete")
+                        ui.icon("hourglass_empty").classes(
+                            "text-2xl ml-2"
+                        ).bind_visibility_from(user_state, "is_idle")
 
             with ui.row().classes("w-full justify-center"):
-                ui.button("Start Over", on_click=lambda: self.go_to(Stage.BATCH_SETUP), icon="replay").props("outline color=blue")
-                ui.button("Cancel Migration", on_click=cancel_migration, icon="stop").props("outline color=red")
+                ui.button(
+                    "Start Over",
+                    on_click=lambda: self.go_to(Stage.BATCH_SETUP),
+                    icon="replay",
+                ).props("outline color=blue")
+                ui.button(
+                    "Cancel Migration", on_click=cancel_migration, icon="stop"
+                ).props("outline color=red")
 
         def _tick():
             current_data = self.migrator.poll_progress()
@@ -740,10 +867,8 @@ class Session:
     async def render_multi_setup(self):
         user_data: list[dict] = []
         is_working = False
-        options = {
-            "personal": True,
-            "shared" : True
-        }
+        options = {"personal": True, "shared": True}
+
         async def ingest_csv(evt: events.UploadEventArguments):
             nonlocal is_working, user_data
             is_working = True
@@ -751,7 +876,9 @@ class Session:
             file = await evt.file.read()
             raw = BytesIO(file)
             match evt.file.content_type:
-                case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+                case (
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                ):
                     user_dataframe = pd.read_excel(raw)
                 case "text/csv":
                     user_dataframe = pd.read_csv(raw)
@@ -762,18 +889,26 @@ class Session:
             logging.debug(f"Ingested DF\n{user_dataframe}")
             rows, cols = user_dataframe.shape
             if cols != 2:
-                logging.warning(f"Expected exacly 2 columns, got {cols}. Rejecting file")
-                ui.notify("Expected exacly 2 columns, got {cols}.", type='warning')
+                logging.warning(
+                    f"Expected exacly 2 columns, got {cols}. Rejecting file"
+                )
+                ui.notify("Expected exacly 2 columns, got {cols}.", type="warning")
                 self.go_to(Stage.BATCH_SETUP)
                 return
-            user_dataframe.columns = ['src', 'dst'] # override names for consistency
-            user_dataframe = user_dataframe.map(lambda x: x.strip() if isinstance(x, str) else x)
-            dat = user_dataframe.to_dict(orient='records')
+            user_dataframe.columns = ["src", "dst"]  # override names for consistency
+            user_dataframe = user_dataframe.map(
+                lambda x: x.strip() if isinstance(x, str) else x
+            )
+            dat = user_dataframe.to_dict(orient="records")
             lookup_tasks = []
             for entry in dat:
-                entry["src_user"] = asyncio.create_task(self.src_org.find_user_by_email(entry['src']))
+                entry["src_user"] = asyncio.create_task(
+                    self.src_org.find_user_by_email(entry["src"])
+                )
                 lookup_tasks.append(entry["src_user"])
-                entry["dst_user"] = asyncio.create_task(self.dst_org.find_user_by_email(entry['dst']))
+                entry["dst_user"] = asyncio.create_task(
+                    self.dst_org.find_user_by_email(entry["dst"])
+                )
                 lookup_tasks.append(entry["dst_user"])
             await asyncio.gather(*lookup_tasks, return_exceptions=True)
             for entry in dat:
@@ -792,27 +927,39 @@ class Session:
 
         @ui.refreshable
         async def ui_container():
-            container = ui.card(align_items='center').classes("w-full")
+            container = ui.card(align_items="center").classes("w-full")
             container.clear()
             with container:
                 if is_working:
-                    ui.spinner(size='lg')
+                    ui.spinner(size="lg")
                 elif len(user_data):
                     with ui.card().classes("w-full p-6 shadow-sm"):
-                        ui.aggrid({'columnDefs': [
-                        {'headerName': 'Source User', 'field': 'src'},
-                        {'headerName': 'Destination User', 'field': 'dst'},
-                        {'headerName': 'Status', 'field': 'status', 'cellClassRules': {
-                            'bg-red-800': 'x == "Error"',
-                            'bg-green-800': 'x == "OK"',
-                        }}], 'rowData': user_data})
+                        ui.aggrid(
+                            {
+                                "columnDefs": [
+                                    {"headerName": "Source User", "field": "src"},
+                                    {"headerName": "Destination User", "field": "dst"},
+                                    {
+                                        "headerName": "Status",
+                                        "field": "status",
+                                        "cellClassRules": {
+                                            "bg-red-800": 'x == "Error"',
+                                            "bg-green-800": 'x == "OK"',
+                                        },
+                                    },
+                                ],
+                                "rowData": user_data,
+                            }
+                        )
                 else:
                     ui.upload(
                         label="Accounts File",
                         auto_upload=True,
                         on_upload=ingest_csv,
                     ).props('flat bordered accept=".csv,.xlsx,.json"')
-                    ui.label("Upload a file listing source and destination accounts. Acceptable formats are: Excel, CSV, and json.").classes("text-xs text-grey-500")
+                    ui.label(
+                        "Upload a file listing source and destination accounts. Acceptable formats are: Excel, CSV, and json."
+                    ).classes("text-xs text-grey-500")
 
         async def handle_continue():
             nonlocal is_working, options, user_data
@@ -829,27 +976,38 @@ class Session:
         with ui.column().classes("w-full items-center gap-6 p-8"):
             ui.label("User Setup").classes("text-h4 font-light")
             await ui_container()
-            with ui.card(align_items='center'):
+            with ui.card(align_items="center"):
                 with ui.row().classes("w-full items-center justify-end gap-4"):
-                    ui.switch("Personal Drives").bind_value(options, 'personal')
-                    ui.switch("Team Drives").bind_value(options, 'shared')
+                    ui.switch("Personal Drives").bind_value(options, "personal")
+                    ui.switch("Team Drives").bind_value(options, "shared")
                 with ui.row().classes("w-full items-center justify-end gap-4"):
-                    ui.button("Back", on_click=lambda: self.go_to(Stage.MODE_SELECT)).props("outline color=blue-500")
+                    ui.button(
+                        "Back", on_click=lambda: self.go_to(Stage.MODE_SELECT)
+                    ).props("outline color=blue-500")
                     ui.button("Continue", on_click=handle_continue).props("elevated")
 
-
-# ----- Auth Specific Helpers ------
+    # ----- Auth Specific Helpers ------
 
     async def ingest_keyfile(self, e: events.UploadEventArguments, is_src: bool):
         file = await e.file.json()
         try:
             tmp = Org(file)
         except ValueError as err:
-            ui.notify("Invalid keyfile. Please try again.", type='negative')
+            ui.notify(
+                "Invalid keyfile. Please try again.",
+                type="negative",
+                timeout=None,
+                close_button=True,
+            )
             logging.warning(f"Ingest keyfile failed! {err}")
             return
         except KeyError as err:
-            ui.notify("Keyfile is malformed!", type='negative')
+            ui.notify(
+                "Keyfile is malformed!",
+                type="negative",
+                timeout=None,
+                close_button=True,
+            )
             logging.warning(f"Rejected keyfile due to {err}")
         if is_src:
             self.src_org = tmp
@@ -859,7 +1017,8 @@ class Session:
                 ui.notify(
                     "Domain setup failed! Did you use the correct keyfile?",
                     type="negative",
-                    timeout=10000,
+                    timeout=None,
+                    close_button=True,
                 )
                 logging.warning(f"Set source domain failed! Error: {err}")
                 self.src_org = None
@@ -872,6 +1031,8 @@ class Session:
                 ui.notify(
                     "Invalid domain! Check domain format and try again.",
                     type="negative",
+                    timeout=None,
+                    close_button=True,
                 )
                 logging.warning(f"Set destination domain failed! Error: {err}")
                 self.dst_org = None
@@ -900,7 +1061,10 @@ class Session:
                 and self.src_domain_admin != ""
             ):
                 ui.notify(
-                    "Source and Destination domains must be different!", type="negative"
+                    "Source and Destination domains must be different!",
+                    type="negative",
+                    timeout=None,
+                    close_button=True,
                 )
 
         with (
@@ -948,14 +1112,16 @@ class Session:
     def __is_auth_configured(self) -> bool:
         if not isinstance(self.src_org, Org) or not isinstance(self.dst_org, Org):
             return False
-        if (self.dst_org.id == self.src_org.id):
-            logging.warning(f"JSON Keyfiles are identical! {self.dst_org.id}, {self.src_org.id}")
-            ui.notify("Same key was uploaded twice. Are you sure you meant to do that?", type='warning')
-            #theoretically same gcloud account could control both domains, don't error
-        return (
-            self.dst_domain_admin is not None
-            and self.src_domain_admin is not None
-        )
+        if self.dst_org.id == self.src_org.id:
+            logging.warning(
+                f"JSON Keyfiles are identical! {self.dst_org.id}, {self.src_org.id}"
+            )
+            ui.notify(
+                "Same key was uploaded twice. Are you sure you meant to do that?",
+                type="warning",
+            )
+            # theoretically same gcloud account could control both domains, don't error
+        return self.dst_domain_admin is not None and self.src_domain_admin is not None
 
     def __clear_auth_file(self, is_src: bool):
         if is_src:
@@ -981,7 +1147,7 @@ if __name__ in {"__main__", "__mp_main__"}:
         exit(0)
     except Exception as e:
         logging.error(f"Process failed: {e}")
-        #keep the script window open on a crash for diagnosis
-        #(mostly for pyinstaller - packaged variants)
+        # keep the script window open on a crash for diagnosis
+        # (mostly for pyinstaller - packaged variants)
         while True:
             pass
