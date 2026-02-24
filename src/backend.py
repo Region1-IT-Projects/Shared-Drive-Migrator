@@ -349,8 +349,16 @@ class SharedDrive(Drive):
         self.possible_successors.append(drive)
         logger.debug(f"Drive {self.id} found potential successor {drive.id}")
 
-    def set_successor(self, drive: SharedDrive):
-        self.successor = drive
+    def set_successor(self, drive: str | Drive):
+        if isinstance(drive, Drive):
+            self.successor = drive
+            return
+        else:
+            for succ in self.possible_successors:
+                if succ.id == drive:
+                    self.successor = succ
+                    return
+        logger.warning(f"Could not set successor {drive}")
 
 
 class User:
@@ -394,11 +402,19 @@ class User:
         return None
 
     async def get_drives(self, include_hidden=False) -> list[SharedDrive]:
-        api_resp: dict = await api(
-            self.drive_service.drives().list,
-            fields="drives(id, name, hidden, restrictions)",
-        )
-        for d in api_resp.get("drives", []):
+        drives = []
+        next_token = None
+        while True:
+            api_resp: dict = await api(
+                self.drive_service.drives().list,
+                 pageToken=next_token,
+                fields="nextPageToken, drives(id, name, hidden, restrictions)",
+            )
+            next_token = api_resp.get("nextPageToken")
+            drives.extend(api_resp.get("drives", []))
+            if not next_token:
+                break
+        for d in drives:
             skip_drive = False
             if await self._check_permissions(d["id"]) in ["owner", "organizer"]:
                 try:
@@ -567,10 +583,14 @@ class Person:
             return_exceptions=False,
         )
         for d in src_drives:
+            if not isinstance(d, SharedDrive):
+                continue
+            src_name = d.name.casefold().strip()
             for dd in dst_drives:
-                if not isinstance(d, SharedDrive) or not isinstance(dd, SharedDrive):
+                dst_name = dd.name.casefold().strip()
+                if not isinstance(dd, SharedDrive):
                     raise TypeError("Expected SharedDrive")
-                if d.name.casefold().strip() == dd.name.casefold().strip():
+                if dst_name in src_name:
                     d.add_potential_successor(dd)
         if auto_set_all:
             self.set_drives(src_drives)

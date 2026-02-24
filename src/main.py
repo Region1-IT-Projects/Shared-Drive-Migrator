@@ -12,6 +12,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 from nicegui import app, events, ui
+import sys
 
 from backend import (
     Migrator,
@@ -26,9 +27,35 @@ from icon import get_icon_base64
 
 load_dotenv()
 
-VERSION = "3.0.2"
+VERSION = "3.0.3"
 log_path = ""  # overridden by logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # Capture everything from DEBUG level up
 
+# 2. Create formatters (how the logs will look)
+log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.DEBUG)  # Only show INFO+ in console
+console_handler.setFormatter(log_format)
+
+# File Handler (logs to a file)
+with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".log") as logfile:
+    log_path = logfile.name
+file_handler = logging.FileHandler(log_path)
+file_handler.setLevel(logging.DEBUG)  # Save everything (DEBUG+) to file
+file_handler.setFormatter(log_format)
+
+# 4. Add handlers to the logger
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
+# Test it out
+logger.info("This will show up in both places.")
+logger.debug("This will only show up in the file.")
+
+
+
+logging.getLogger("nicegui").setLevel(logging.WARNING)
 
 class Stage(Enum):
     AUTH_SETUP = 0
@@ -57,7 +84,7 @@ class Session:
             "max_size": 500,
             "skip_migrated": True,
         }
-        logging.debug(f"Created new session {self.id}")
+        logger.debug(f"Created new session {self.id}")
 
     @ui.refreshable
     async def router(self):
@@ -104,7 +131,7 @@ class Session:
                 self.stage = Stage.SINGLE_SETUP_ACCT
             case _:
                 self.stage = stage
-        logging.debug(f"App stage is now {self.stage.name}")
+        logger.debug(f"App stage is now {self.stage.name}")
         self.router.refresh()
         self.render_footer.refresh()
 
@@ -353,7 +380,7 @@ class Session:
 
         async def finalize_user_selection(e: events.ValueChangeEventArguments):
             selected_user = e.value
-            logging.debug(f"User selected: {selected_user}")
+            logger.debug(f"User selected: {selected_user}")
             with account_row:
                 ui.spinner(size="md").classes("ml-2")
                 try:
@@ -363,7 +390,7 @@ class Session:
                     self.show_admin_sdk_error(e)
                     return
                 except MigratorError as e:
-                    logging.error(f"Error finding user: {e}")
+                    logger.error(f"Error finding user: {e}")
                     ui.notify(
                         "Error finding user! Check logs for details.",
                         type="negative",
@@ -391,7 +418,7 @@ class Session:
                 self.show_admin_sdk_error(e)
                 return
             except Exception as e:
-                logging.error(f"Failed to fetch user list! Error: {e}")
+                logger.error(f"Failed to fetch user list! Error: {e}")
                 ui.notify(
                     "Failed to fetch user list! Check logs for details.",
                     type="negative",
@@ -399,7 +426,7 @@ class Session:
                     close_button=True,
                 )
             container.clear()
-            logging.debug(f"User list fetched with {len(user_list)} users")
+            logger.debug(f"User list fetched with {len(user_list)} users")
             ui.label("User Setup").classes("text-h4 font-light")
             ui.label("Search for a user...").classes("text-grey")
 
@@ -427,7 +454,7 @@ class Session:
                     SharedDrive
                 ] = await target_person.generate_drive_list()
             except Exception as e:
-                logging.error(f"Failed to fetch drive list: {e}")
+                logger.error(f"Failed to fetch drive list: {e}")
                 ui.notify(
                     "Failed to fetch drives. Check logs for details.",
                     type="negative",
@@ -463,14 +490,14 @@ class Session:
                 else:
                     for drive in drive_list:
                         if not isinstance(drive, SharedDrive):
-                            logging.error(
+                            logger.error(
                                 f"Expected SharedDrive instance, got {type(drive)}. Skipping."
                             )
                             continue
                         if drive.migrated and self.user_settings.get(
                             "skip_migrated", True
                         ):
-                            logging.info(f"Drive {drive} already migrated, skipping.")
+                            logger.info(f"Drive {drive} already migrated, skipping.")
                             continue
                         drive_name = str(drive)
                         drive_id = drive.id
@@ -480,20 +507,19 @@ class Session:
                                 ui.label(drive_name).classes("text-md font-medium")
                                 ui.label(str(drive_id)).classes("text-xs text-grey-500")
                                 # If this drive has possible successors, show a dropdown to pick one
-                                if drive.possible_successors:
-                                    options = [("Create a new drive", None)] + [
-                                        (f"{s.name} ({s.id})", s)
-                                        for s in drive.possible_successors
-                                    ]
-                                    successors_selects[drive_id] = (
-                                        ui.select(
-                                            label="Migrate Into",
-                                            options=options,
-                                            value=None,
-                                        )
-                                        .classes("w-64")
-                                        .props("clearable")
+                            if drive.possible_successors:
+                                options = {None: "Create a new drive"}
+                                for succ in drive.possible_successors:
+                                    options[succ.id] = f"{succ.name} ({succ.id})"
+                                successors_selects[drive_id] = (
+                                    ui.select(
+                                        label="Migrate Into",
+                                        options=options,
+                                        value=None,
                                     )
+                                    .classes("w-64")
+                                    .props("clearable")
+                                )
                             switches[drive_id] = ui.switch(value=True)
 
             # Buttons row
@@ -514,7 +540,7 @@ class Session:
                             try:
                                 d.set_successor(sel.value)
                             except Exception as e:
-                                logging.error(
+                                logger.error(
                                     f"Failed to set successor for drive {did}: {e}"
                                 )
 
@@ -525,7 +551,7 @@ class Session:
                     )
                     target_person.set_drives(selected)
                     self.migrator.init_migration(personal, self.user_settings)
-                    logging.debug(
+                    logger.debug(
                         f"Selected drives: {[getattr(d, 'id', str(d)) for d in selected]}"
                     )
                     self.go_to(Stage.SINGLE_PROGRESS)
@@ -701,8 +727,6 @@ class Session:
             ui.notify("Migration Cancelled", type="warning")
             prog_timer.deactivate()
 
-        ui.notify("Initializing migration stats...", type="info")
-
         raw_data = {}
         for _ in range(15):
             raw_data = self.migrator.poll_progress()
@@ -743,7 +767,7 @@ class Session:
         prog_timer.deactivate()
         _tick()  # Ensure UI reflects 100% completion
 
-        logging.debug(f"Migration completed with result: {res}")
+        logger.debug(f"Migration completed with result: {res}")
         with container:
             ui.label("Migration Complete!").classes("text-h4 text-green-600")
 
@@ -863,7 +887,7 @@ class Session:
         prog_timer.deactivate()
         _tick()
 
-        logging.debug(f"Batch migration completed with result: {res}")
+        logger.debug(f"Batch migration completed with result: {res}")
         with container:
             ui.label("Batch Migration Complete!").classes("text-h4 text-green-600")
 
@@ -888,11 +912,11 @@ class Session:
                 case "application/json":
                     user_dataframe = pd.read_json(raw)
                 case _:
-                    logging.warning(f"Got unknown file type {evt.file.content_type}")
-            logging.debug(f"Ingested DF\n{user_dataframe}")
+                    logger.warning(f"Got unknown file type {evt.file.content_type}")
+            logger.debug(f"Ingested DF\n{user_dataframe}")
             rows, cols = user_dataframe.shape
             if cols != 2:
-                logging.warning(
+                logger.warning(
                     f"Expected exacly 2 columns, got {cols}. Rejecting file"
                 )
                 ui.notify("Expected exacly 2 columns, got {cols}.", type="warning")
@@ -922,7 +946,7 @@ class Session:
                     entry["status"] = "OK"
                 else:
                     entry["status"] = "Error"
-                    logging.error(f"Failure to init {entry}, got results {src}, {dst}")
+                    logger.error(f"Failure to init {entry}, got results {src}, {dst}")
 
             is_working = False
             user_data = dat
@@ -1002,7 +1026,7 @@ class Session:
                 timeout=None,
                 close_button=True,
             )
-            logging.warning(f"Ingest keyfile failed! {err}")
+            logger.warning(f"Ingest keyfile failed! {err}")
             return
         except KeyError as err:
             ui.notify(
@@ -1011,7 +1035,7 @@ class Session:
                 timeout=None,
                 close_button=True,
             )
-            logging.warning(f"Rejected keyfile due to {err}")
+            logger.warning(f"Rejected keyfile due to {err}")
         if is_src:
             self.src_org = tmp
             try:
@@ -1023,7 +1047,7 @@ class Session:
                     timeout=None,
                     close_button=True,
                 )
-                logging.warning(f"Set source domain failed! Error: {err}")
+                logger.warning(f"Set source domain failed! Error: {err}")
                 self.src_org = None
                 self.src_domain_admin = ""
         else:
@@ -1037,7 +1061,7 @@ class Session:
                     timeout=None,
                     close_button=True,
                 )
-                logging.warning(f"Set destination domain failed! Error: {err}")
+                logger.warning(f"Set destination domain failed! Error: {err}")
                 self.dst_org = None
                 self.dst_domain_admin = ""
 
@@ -1116,7 +1140,7 @@ class Session:
         if not isinstance(self.src_org, Org) or not isinstance(self.dst_org, Org):
             return False
         if self.dst_org.id == self.src_org.id:
-            logging.warning(
+            logger.warning(
                 f"JSON Keyfiles are identical! {self.dst_org.id}, {self.src_org.id}"
             )
             ui.notify(
@@ -1134,27 +1158,13 @@ class Session:
         self.router.refresh()
 
 
-with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".log") as tmp:
-    log_path = tmp.name
-
-    # 2. Configure logging to use the temp file path
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        filename=log_path,
-        filemode="w",
-        force=True,
-    )
-logging.getLogger("nicegui").setLevel(logging.WARNING)
-
-
 def check_github_new_version() -> bool:
     try:
         res = requests.get(
             "https://api.github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator/releases/latest"
         )
     except requests.exceptions.HTTPError:
-        logging.warning("Failed to check for new version on GitHub.")
+        logger.warning("Failed to check for new version on GitHub.")
         return False
     if res.status_code == 200:
         latest_version = res.json().get("tag_name", "")
@@ -1177,11 +1187,15 @@ async def main_view():
             timeout=10000,
             close_button=True,
         )
-
+def handle_exception(self, exception):
+    # Log it to the console so you don't lose the traceback
+    logger.fatal(f"Global Error Caught: {exception}")
+    app.shutdown()
 
 if __name__ in {"__main__", "__mp_main__"}:
     # don't fork bomb in pyinstaller version
     multiprocessing.freeze_support()
+    app.on_exception(handle_exception)
     try:
         ui.run(
             storage_secret="supersecret",
@@ -1191,10 +1205,10 @@ if __name__ in {"__main__", "__mp_main__"}:
             host="127.0.0.1",
         )
     except KeyboardInterrupt:
-        logging.info("Goodbye")
+        logger.info("Goodbye")
         app.shutdown()
     except Exception as e:
-        logging.error(f"Process failed: {e}")
+        logger.error(f"Process failed: {e}")
         # keep the script window open on a crash for diagnosis
         # (mostly for pyinstaller - packaged variants)
         while True:
