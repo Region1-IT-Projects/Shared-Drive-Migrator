@@ -1013,7 +1013,7 @@ class Org:
         query_ret = await api(
             self.user_service.users().list,
             customer="my_customer",
-            query=f'name:"{name}"',
+            query=f'name:"{name.replace("'", "\\'")}"',
         )
 
         if "users" not in query_ret or len(query_ret["users"]) == 0:

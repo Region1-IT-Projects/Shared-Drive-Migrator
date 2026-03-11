@@ -27,34 +27,21 @@ from icon import get_icon_base64
 
 load_dotenv()
 
-VERSION = "3.0.3"
-log_path = ""  # overridden by logger
+VERSION = "3.0.5"
+# -- Configure Logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Capture everything from DEBUG level up
-
-# 2. Create formatters (how the logs will look)
 log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.DEBUG)  # Only show INFO+ in console
 console_handler.setFormatter(log_format)
-
-# File Handler (logs to a file)
 with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".log") as logfile:
     log_path = logfile.name
 file_handler = logging.FileHandler(log_path)
 file_handler.setLevel(logging.DEBUG)  # Save everything (DEBUG+) to file
 file_handler.setFormatter(log_format)
-
-# 4. Add handlers to the logger
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
-
-# Test it out
-logger.info("This will show up in both places.")
-logger.debug("This will only show up in the file.")
-
-
-
 logging.getLogger("nicegui").setLevel(logging.WARNING)
 
 class Stage(Enum):
@@ -147,11 +134,11 @@ class Session:
         dialog.open()
 
     def render_header(self):
-        # 'elevated' adds a shadow, 'bordered' adds a bottom line
+        new_version_avail = check_github_new_version()
         with ui.header(elevated=True).classes("p-4 items-center justify-between"):
             with ui.row().classes("items-center gap-3"):
                 ui.icon("auto_awesome", color="white").classes("text-2xl")
-                ui.label("Drive Migration Wizard").classes("text-xl font-bold")
+                ui.label(f"Drive Migration Wizard v{VERSION}{' (Outdated!)' if new_version_avail else ''}").classes("text-xl font-bold")
 
             with ui.row().classes("items-center gap-4"):
                 ui.button(
@@ -159,7 +146,7 @@ class Session:
                     on_click=lambda: ui.run_javascript(
                         'window.open("https://github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator", "_blank")'
                     ),
-                ).props("flat color=white").tooltip("Open GitHub Repo")
+                ).props(f"flat color={'red' if new_version_avail else 'white'}").tooltip("Open GitHub Repo")
                 ui.button(
                     icon="power_settings_new",
                     on_click=self.confirm_shutdown,
@@ -167,6 +154,13 @@ class Session:
                 ui.button(icon="settings", on_click=self.render_options_dialog).props(
                     "flat color=white"
                 ).tooltip("Settings")
+                if new_version_avail:
+                    ui.notify(
+                        "A new version of the Drive Migration Wizard is available! Check the GitHub releases page for details.",
+                        type="info",
+                        timeout=10000,
+                        close_button=True,
+                    )
 
     def footer_shell(self):
         with ui.footer().classes("border-t p-2 px-8"):
@@ -1169,6 +1163,7 @@ def check_github_new_version() -> bool:
     if res.status_code == 200:
         latest_version = res.json().get("tag_name", "")
         if latest_version and latest_version > VERSION:
+            logger.info(f"A new version is available on Github. ({VERSION} -> {latest_version})")
             return True
     return False
 
@@ -1180,13 +1175,7 @@ async def main_view():
     session.render_header()
     await session.router()
     session.footer_shell()
-    if check_github_new_version():
-        ui.notify(
-            "A new version of the Drive Migration Wizard is available! Check the GitHub releases page for details.",
-            type="info",
-            timeout=10000,
-            close_button=True,
-        )
+
 def handle_exception(self, exception):
     # Log it to the console so you don't lose the traceback
     logger.fatal(f"Global Error Caught: {exception}")
