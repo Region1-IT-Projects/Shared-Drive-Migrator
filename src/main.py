@@ -2,24 +2,24 @@ import asyncio
 import logging
 import multiprocessing
 import os
+import sys
 import tempfile
 import uuid
 from datetime import timedelta
 from enum import Enum
 from io import BytesIO
+from math import ceil
 
 import pandas as pd
 import requests
 from dotenv import load_dotenv
 from nicegui import app, events, ui
-import sys
 
 from backend import (
     Migrator,
     MigratorError,
     MissingAdminSDKError,
     Org,
-    Drive,
     SharedDrive,
     User,
     get_api_stats,
@@ -915,12 +915,13 @@ class Session:
 
     async def render_multi_setup(self):
         user_data: list[dict] = []
-        is_working = False
+        progress = {'value': None}
         options = {"personal": True, "shared": True}
 
         async def ingest_csv(evt: events.UploadEventArguments):
-            nonlocal is_working, user_data
-            is_working = True
+            nonlocal user_data, progress
+            LOOKUP_BATCH_SIZE = 5
+            progress['value'] = 0.0
             ui_container.refresh()
             file = await evt.file.read()
             raw = BytesIO(file)
@@ -950,16 +951,24 @@ class Session:
             )
             dat = user_dataframe.to_dict(orient="records")
             lookup_tasks = []
+            lookup_sem = asyncio.Semaphore(2)
             for entry in dat:
                 entry["src_user"] = asyncio.create_task(
-                    self.src_org.find_user_by_email(entry["src"])
+                    self.src_org.find_user_by_email(entry["src"], lookup_sem)
                 )
                 lookup_tasks.append(entry["src_user"])
                 entry["dst_user"] = asyncio.create_task(
-                    self.dst_org.find_user_by_email(entry["dst"])
+                    self.dst_org.find_user_by_email(entry["dst"], lookup_sem)
                 )
                 lookup_tasks.append(entry["dst_user"])
-            await asyncio.gather(*lookup_tasks, return_exceptions=True)
+            logger.debug(f"Looking up with {len(lookup_tasks)} tasks")
+            n_batch = ceil(len(lookup_tasks)/LOOKUP_BATCH_SIZE)
+            for i in range(n_batch):
+                progress['value'] = (i+1)/n_batch
+                logger.debug(f"Looking up users; batch {i} of {n_batch}")
+                batch = lookup_tasks[LOOKUP_BATCH_SIZE*i:min(LOOKUP_BATCH_SIZE*(i+1), len(lookup_tasks))]
+                await asyncio.gather(*batch, return_exceptions=True)
+                await asyncio.sleep(.1) # this is hacky but I'm at the end of my wits rn
             for entry in dat:
                 src = entry.pop("src_user").result()
                 dst = entry.pop("dst_user").result()
@@ -969,8 +978,8 @@ class Session:
                 else:
                     entry["status"] = "Error"
                     logger.error(f"Failure to init {entry}, got results {src}, {dst}")
-
-            is_working = False
+            logger.info("finished ingest")
+            progress['value'] = None
             user_data = dat
             ui_container.refresh()
 
@@ -979,8 +988,8 @@ class Session:
             container = ui.card(align_items="center").classes("w-full")
             container.clear()
             with container:
-                if is_working:
-                    ui.spinner(size="lg")
+                if progress['value'] is not None:
+                    ui.linear_progress(show_value=False).bind_value_from(progress, 'value')
                 elif len(user_data):
                     with ui.card().classes("w-full p-6 shadow-sm"):
                         ui.aggrid(
@@ -1011,14 +1020,16 @@ class Session:
                     ).classes("text-xs text-grey-500")
 
         async def handle_continue():
-            nonlocal is_working, options, user_data
-            is_working = True
+            nonlocal progress, options, user_data
+            progress['value'] = 0.0
             ui_container.refresh()
             if options.get("shared"):
                 tasks = []
                 for person in self.migrator.targets:
                     tasks.append(asyncio.create_task(person.generate_drive_list(True)))
+                progress['value'] = 0.5
                 await asyncio.gather(*tasks)
+            progress['value'] = 1.0
             self.migrator.init_migration(options.get("personal"), self.user_settings)
             self.go_to(Stage.BATCH_PROGRESS)
 

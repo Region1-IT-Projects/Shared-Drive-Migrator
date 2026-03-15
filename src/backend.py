@@ -1039,7 +1039,10 @@ class Org:
             user_info.get("thumbnailPhotoUrl")
         )
 
-    async def find_user_by_email(self, email) -> User | None:
+    async def find_user_by_email(self, email, sem: asyncio.Semaphore | None = None) -> User | None:
+        if isinstance(sem, asyncio.Semaphore):
+            async with sem:
+                return await self.find_user_by_email(email, None)
 
         query_ret = await api(
             self.user_service.users().list,
