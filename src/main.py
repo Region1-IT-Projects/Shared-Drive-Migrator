@@ -19,6 +19,7 @@ from backend import (
     MigratorError,
     MissingAdminSDKError,
     Org,
+    Drive,
     SharedDrive,
     User,
     get_api_stats,
@@ -27,7 +28,7 @@ from icon import get_icon_base64
 
 load_dotenv()
 
-VERSION = "3.0.5"
+VERSION = "3.0.6"
 # -- Configure Logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Capture everything from DEBUG level up
@@ -437,6 +438,31 @@ class Session:
             ).props("elevated")
             continue_btn.set_enabled(False)
 
+    async def personal_drive_validation_popup(self):
+        logger.debug("Starting validation for personal drive")
+        target_person = self.migrator.targets[0]
+        popup = ui.dialog()
+        popup.open()
+        columns = [
+            {'name':'name', 'label': 'File Name', 'field': 'name'},
+            {'name':'id', 'label': 'File UUID', 'field': 'id'},
+            {'name':'valid', 'label': 'Is Migratable', 'field': 'valid'},
+        ]
+        with popup, ui.card().classes("w-full items-center") as card:
+            ui.label("Indexing...").classes("text-lg font-bold")
+            ui.spinner(size='lg')
+            await asyncio.gather(target_person.src_user.index_personal_drive_files(), target_person.dst_user.index_personal_drive_files())
+            errors = target_person.src_user.personal_drive.correlate(target_person.dst_user.personal_drive.all_files)
+            card.clear()
+            if len(errors):
+                ui.label(f"{len(errors)} Failed Files").classes("text-lg font-bold")
+                # with ui.scroll_area().classes("h-64 border p-2 w-full"), ui.column().classes("gap-1"):
+                rows = [{'name': f.name, 'id': f.id, 'valid': ("No" if f.is_invalid else "Yes")} for f in errors]
+                ui.table(columns=columns, rows=rows, row_key='id')
+            else:
+                ui.label("No Issues Found.").classes("text-lg font-bold")
+            ui.button("Close", on_click=popup.close).classes("self-end")
+
     async def render_single_drive_select(self):
         target_person = self.migrator.targets[0]
         container = ui.column().classes("w-full items-center gap-8 p-8")
@@ -474,6 +500,8 @@ class Session:
                         ui.label("Personal Google Drive").classes(
                             "text-md font-medium text-orange-500"
                         )
+                    with ui.button("Validate Transfer", on_click=self.personal_drive_validation_popup):
+                        ui.tooltip("Identify any files that have not been migrated")
                     migrate_personal_switch = ui.switch(value=True).props(
                         "color=orange"
                     )
@@ -1176,7 +1204,7 @@ async def main_view():
     await session.router()
     session.footer_shell()
 
-def handle_exception(self, exception):
+def handle_exception(exception: Exception):
     # Log it to the console so you don't lose the traceback
     logger.fatal(f"Global Error Caught: {exception}")
     app.shutdown()
@@ -1198,7 +1226,3 @@ if __name__ in {"__main__", "__mp_main__"}:
         app.shutdown()
     except Exception as e:
         logger.error(f"Process failed: {e}")
-        # keep the script window open on a crash for diagnosis
-        # (mostly for pyinstaller - packaged variants)
-        while True:
-            pass

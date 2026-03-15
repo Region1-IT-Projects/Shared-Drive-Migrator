@@ -21,7 +21,6 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # Constants
 MAX_BACKOFF = 30 # seconds
-MAX_RECURSION_DEPTH = 100
 
 logger = logging.getLogger(__name__)
 # mute google api stuff
@@ -265,9 +264,7 @@ class File:
         self.is_folder = self.mime_type == "application/vnd.google-apps.folder"
         self.is_invalid = self.mime_type in uncopyable_mime_types
         self.trashed = infodict.get("trashed", False)
-        self.migrated = (
-            infodict.get("properties", {}).get("migrator_new_id", None) is not None
-        )
+        self.migrated = infodict.get("properties", {}).get("migrator_new_id", None)
         self.permissions = infodict.get("permissions", [])
         parentlist = infodict.get("parents", [])
         self.parent_id = parentlist[0] if len(parentlist) == 1 else None
@@ -331,6 +328,23 @@ class Drive:
             else:
                 self.root.append(f)
         self.initialized = True
+
+    def correlate(self, successor_files: dict[str, File]) -> list[File]:
+        """ Iterates over our files' migrated IDs, identify members not present in downstream. """
+        bad_files = []
+        good_files = []
+        unmigrated_files = []
+        for f in self.all_files.values():
+            if f.migrated is None:
+                unmigrated_files.append(f)
+                pass
+            if f.migrated not in successor_files:
+                logger.debug(f"File {f.id} marked as migrated to {f.migrated} which does not exist in successor!")
+                bad_files.append(f)
+            else:
+                good_files.append(f)
+        logger.info(f"Correlation finished with {len(bad_files)} bad files, {len(good_files)}, OK files, and {len(unmigrated_files)} never migrated.")
+        return bad_files + unmigrated_files
 
 
 class SharedDrive(Drive):
@@ -512,7 +526,6 @@ class User:
         """Async version of file listing."""
         next_token = None
         files = []
-        depth = 0
         while True:
             query_ret: dict = await api(
                 self.drive_service.files().list,
@@ -529,11 +542,6 @@ class User:
             files.extend(query_ret.get("files", []))
             if not next_token:
                 break
-            if depth > MAX_RECURSION_DEPTH:
-                # not acutally recursion but whatevs
-                logger.warning("Bailing out of _fetch_files due to hitting max. recursion depth! File list may be incomplete.")
-                break
-            depth += 1
 
         return files
 
