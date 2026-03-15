@@ -28,7 +28,7 @@ from icon import get_icon_base64
 
 load_dotenv()
 
-VERSION = "3.0.6"
+VERSION = "3.0.7"
 # -- Configure Logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Capture everything from DEBUG level up
@@ -989,7 +989,7 @@ class Session:
             container.clear()
             with container:
                 if progress['value'] is not None:
-                    ui.linear_progress(show_value=False).bind_value_from(progress, 'value')
+                    ui.linear_progress(show_value=False, size='20px').bind_value_from(progress, 'value')
                 elif len(user_data):
                     with ui.card().classes("w-full p-6 shadow-sm"):
                         ui.aggrid(
