@@ -18,11 +18,12 @@ from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
-
+import pdb
 # Constants
 MAX_BACKOFF = 30 # seconds
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 # mute google api stuff
 for logger_name in [
     "googleapiclient.discovery_cache",
@@ -41,7 +42,6 @@ mime_map = {
     "application/vnd.google-apps.drawing": "image/jpeg",
     "application/vnd.google-apps.jam": "application/pdf",
 }
-
 class ThreadLocalHttp:
     def __init__(self, credentials):
         self.credentials = credentials
@@ -291,6 +291,9 @@ class Drive:
     def __str__(self):
         return str(self.name)
 
+    def __repr__(self):
+        return f"<Drive Object '{self.name}' [{self.id}]>"
+
     def bip(self):
         self.time_estimator.bip()
         self.num_migrated_files += 1
@@ -312,7 +315,7 @@ class Drive:
             newf = File(f)
             if newf.trashed or newf.is_invalid:
                 logger.debug(
-                    f"Skipping file {newf.name} (id: {newf.id}) in drive {self.name} because it is {'trashed' if newf.trashed else 'invalid MIME type'}"
+                    f"Skipping file {newf.name} (id: {newf.id}) in drive {self.name} because it is {'trashed' if newf.trashed else 'invalid MIME type (' + newf.mime_type + ')'}"
                 )
                 continue
             if skip_migrated and newf.migrated:
@@ -329,7 +332,7 @@ class Drive:
                 self.root.append(f)
         self.initialized = True
 
-    def correlate(self, successor_files: dict[str, File]) -> list[File]:
+    def correlate(self, successor_files: dict[str, File]):
         """ Iterates over our files' migrated IDs, identify members not present in downstream. """
         bad_files = []
         good_files = []
@@ -337,14 +340,14 @@ class Drive:
         for f in self.all_files.values():
             if f.migrated is None:
                 unmigrated_files.append(f)
-                pass
-            if f.migrated not in successor_files:
+                pdb.set_trace()
+            elif f.migrated not in successor_files:
                 logger.debug(f"File {f.id} marked as migrated to {f.migrated} which does not exist in successor!")
                 bad_files.append(f)
             else:
                 good_files.append(f)
         logger.info(f"Correlation finished with {len(bad_files)} bad files, {len(good_files)}, OK files, and {len(unmigrated_files)} never migrated.")
-        return bad_files + unmigrated_files
+        return bad_files, unmigrated_files
 
 
 class SharedDrive(Drive):
@@ -358,6 +361,9 @@ class SharedDrive(Drive):
         # successor system allows resubility of already migrated drives in case of migration failure or partial migration
         self.possible_successors: list[SharedDrive] = []
         self.successor: SharedDrive | None = None
+
+    def __repr__(self):
+        return "<Shared " + super().__repr__().lstrip("<")
 
     def add_potential_successor(self, drive: SharedDrive):
         self.possible_successors.append(drive)
@@ -611,16 +617,22 @@ class Person:
         logger.info("Got abort command")
         self.run = False
 
-    async def _online_copy_file(self, file: File, parent_id: str | None, sem: asyncio.Semaphore):
+    async def _online_copy_file(self, file: File, parent_id: str | None, sem: asyncio.Semaphore, individual_share: bool = False):
         """Worker to asynchronously copy single file"""
         if not self.run:
             return
+        permission_id = None
         new_metadata = {
             "name": file.name,
             "mimeType": file.mime_type,
             "parents": [parent_id] if parent_id else [],
             "properties": {"migrator_source_id": file.id},
         }
+        if individual_share:
+            async with sem:
+                permission_id = await self.src_user.share_object(file.id, self.dst_user.address, role="writer")
+                logger.debug(f"Shared file {file.id}")
+            await asyncio.sleep(1) #wait for share to propogate, yielding to other tasks
         async with sem:
             try:
                 resp = await api(
@@ -640,7 +652,12 @@ class Person:
                 logger.error(
                     f"Failed to copy file {file.name}: {e}"
                 )
+                pdb.set_trace()
                 raise e
+            finally:
+                #remove share no matter what
+                if permission_id:
+                    await self.src_user.remove_share(file.id, permission_id)
             try:
                 await api(
                     self.src_user.drive_service.files().update,
@@ -661,7 +678,7 @@ class Person:
         """Refactored Async Strategy B: Download and Re-upload."""
         if self.max_download_size <= 0:
             logger.debug("Skipping offline migration attempt, downloading is disabled.")
-            return
+            raise FileNotDownloadableError("Downloads Disbaled")
         async with sem:  # Limit heavy transfers
             try:
                 metadata = await api(
@@ -721,7 +738,7 @@ class Person:
 
     async def copy_file(self, file: File, parent_id, src_drive: Drive, sem: asyncio.Semaphore, sem_heavy: asyncio.Semaphore):
         try:
-            await self._online_copy_file(file, parent_id, sem)
+            await self._online_copy_file(file, parent_id, sem, not isinstance(src_drive, SharedDrive))
         except MigratorError:
             logger.warning(f"Failed online migration of {file.name}, attempting offline method")
             try:

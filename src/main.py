@@ -41,8 +41,9 @@ with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".log") as logfi
 file_handler = logging.FileHandler(log_path)
 file_handler.setLevel(logging.DEBUG)  # Save everything (DEBUG+) to file
 file_handler.setFormatter(log_format)
-logger.addHandler(console_handler)
-logger.addHandler(file_handler)
+rootlogger = logging.getLogger()
+rootlogger.addHandler(console_handler)
+rootlogger.addHandler(file_handler)
 logging.getLogger("nicegui").setLevel(logging.WARNING)
 
 class Stage(Enum):
@@ -447,17 +448,20 @@ class Session:
             {'name':'name', 'label': 'File Name', 'field': 'name'},
             {'name':'id', 'label': 'File UUID', 'field': 'id'},
             {'name':'valid', 'label': 'Is Migratable', 'field': 'valid'},
+            {'name':'migrated', 'label': 'Marked Migrated', 'field': 'migrated'},
         ]
         with popup, ui.card().classes("w-full items-center") as card:
             ui.label("Indexing...").classes("text-lg font-bold")
             ui.spinner(size='lg')
             await asyncio.gather(target_person.src_user.index_personal_drive_files(), target_person.dst_user.index_personal_drive_files())
-            errors = target_person.src_user.personal_drive.correlate(target_person.dst_user.personal_drive.all_files)
+            errors, unmigrated = target_person.src_user.personal_drive.correlate(target_person.dst_user.personal_drive.all_files)
+            # logger.debug(f"Finished correlation with {errors}, {unmigrated}")
             card.clear()
-            if len(errors):
-                ui.label(f"{len(errors)} Failed Files").classes("text-lg font-bold")
+            if len(errors) or len(unmigrated):
+                ui.label(f"{len(errors)} Failed Files, {(len(unmigrated))} Unmigrated Files").classes("text-lg font-bold")
                 # with ui.scroll_area().classes("h-64 border p-2 w-full"), ui.column().classes("gap-1"):
-                rows = [{'name': f.name, 'id': f.id, 'valid': ("No" if f.is_invalid else "Yes")} for f in errors]
+                rows = [{'name': f.name, 'id': f.id, 'valid': ("No" if f.is_invalid else "Yes"), "migrated": "Yes"} for f in errors]
+                rows.extend([{'name': f.name, 'id': f.id, 'valid': ("No" if f.is_invalid else "Yes"), "migrated": "No"} for f in unmigrated])
                 ui.table(columns=columns, rows=rows, row_key='id')
             else:
                 ui.label("No Issues Found.").classes("text-lg font-bold")
