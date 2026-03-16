@@ -18,7 +18,7 @@ from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
-import pdb
+
 # Constants
 MAX_BACKOFF = 30 # seconds
 
@@ -338,9 +338,10 @@ class Drive:
         good_files = []
         unmigrated_files = []
         for f in self.all_files.values():
+            if f.is_folder:
+                continue
             if f.migrated is None:
                 unmigrated_files.append(f)
-                pdb.set_trace()
             elif f.migrated not in successor_files:
                 logger.debug(f"File {f.id} marked as migrated to {f.migrated} which does not exist in successor!")
                 bad_files.append(f)
@@ -628,51 +629,55 @@ class Person:
             "parents": [parent_id] if parent_id else [],
             "properties": {"migrator_source_id": file.id},
         }
-        if individual_share:
+        for _ in range(3):
             async with sem:
-                permission_id = await self.src_user.share_object(file.id, self.dst_user.address, role="writer")
-                logger.debug(f"Shared file {file.id}")
-            await asyncio.sleep(1) #wait for share to propogate, yielding to other tasks
-        async with sem:
-            try:
-                resp = await api(
-                    self.dst_user.drive_service.files().copy,
-                    supportsAllDrives=True,
-                    fileId=file.id,
-                    body=new_metadata,
-                    fields="id",
-                )
-                new_id = resp.get("id", None)
-                if not new_id:
-                    logger.error(
-                        f"Failed to copy file {file.name}, empty response from API: {resp}"
+                try:
+                    if individual_share and not permission_id:
+                        permission_id = await self.src_user.share_object(file.id, self.dst_user.address, role="writer")
+                        await asyncio.sleep(0.5)
+                    resp = await api(
+                        self.dst_user.drive_service.files().copy,
+                        supportsAllDrives=True,
+                        fileId=file.id,
+                        body=new_metadata,
+                        fields="id"
                     )
-                    raise UnknownAPIError("Empty response from API")
-            except MigratorError as e:
-                logger.error(
-                    f"Failed to copy file {file.name}: {e}"
+                    new_id = resp.get("id", None)
+                    if not new_id:
+                        logger.error(
+                            f"Failed to copy file {file.name}, empty response from API: {resp}"
+                        )
+                        raise UnknownAPIError("Empty response from API")
+                except (FileNotFoundError, PermissionError):
+                    logger.warning(f"File Permissions haven't taken effect yet for {file.id}, retrying...")
+                    continue
+                except MigratorError as e:
+                    logger.error(
+                        f"Failed to copy file {file.name}: {e}"
+                    )
+                    raise e
+                finally:
+                    #remove share no matter what
+                    if permission_id:
+                        await self.src_user.remove_share(file.id, permission_id)
+                try:
+                    await api(
+                        self.src_user.drive_service.files().update,
+                        supportsAllDrives=True,
+                        fileId=file.id,
+                        body={"properties": {"migrator_new_id": new_id}},
+                    )
+                except MigratorError as e:
+                    logger.warning(
+                        f"Failed to mark file {file.name} as migrated: {e}"
+                    )
+                    # don't raise error since the file was successfully copied, just log it and move on
+                logger.debug(
+                    f"Copied file {file.name} to new location with id {new_id}"
                 )
-                pdb.set_trace()
-                raise e
-            finally:
-                #remove share no matter what
-                if permission_id:
-                    await self.src_user.remove_share(file.id, permission_id)
-            try:
-                await api(
-                    self.src_user.drive_service.files().update,
-                    supportsAllDrives=True,
-                    fileId=file.id,
-                    body={"properties": {"migrator_new_id": new_id}},
-                )
-            except MigratorError as e:
-                logger.warning(
-                    f"Failed to mark file {file.name} as migrated: {e}"
-                )
-                # don't raise error since the file was successfully copied, just log it and move on
-            logger.debug(
-                f"Copied file {file.name} to new location with id {new_id}"
-            )
+                return
+        logger.error(f"Ran out of attempts for file {file.id}")
+        raise MigratorError
 
     async def _offline_copy_file(self, file: File, parent_id: str, sem: asyncio.Semaphore) -> str | None:
         """Refactored Async Strategy B: Download and Re-upload."""
@@ -745,7 +750,7 @@ class Person:
                 await self._offline_copy_file(file, parent_id, sem_heavy)
             except MigratorError:
                 logging.error(f"Both methods of copying file {file.name} failed!")
-                src_drive.failed_files.append(file.name)
+                src_drive.failed_files.append(file)
         src_drive.bip()
 
     async def folder_build_migration_tasks(self, folder: File, parent_id: str | None, src_drive: Drive, sem: asyncio.Semaphore, sem_heavy: asyncio.Semaphore) -> list:
