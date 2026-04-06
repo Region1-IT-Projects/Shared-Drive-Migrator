@@ -28,11 +28,11 @@ from icon import get_icon_base64
 
 load_dotenv()
 
-VERSION = "3.0.7"
+VERSION = "3.0.9"
 # -- Configure Logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Capture everything from DEBUG level up
-log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+log_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.DEBUG)  # Only show INFO+ in console
 console_handler.setFormatter(log_format)
@@ -46,15 +46,15 @@ rootlogger.addHandler(console_handler)
 rootlogger.addHandler(file_handler)
 logging.getLogger("nicegui").setLevel(logging.WARNING)
 
+
 class Stage(Enum):
     AUTH_SETUP = 0
     MODE_SELECT = 1
     SINGLE_SETUP_ACCT = 2
     SINGLE_SETUP_DRIVES = 3
     SINGLE_PROGRESS = 4
-    SINGLE_FINISHED = 5
-    BATCH_SETUP = 6
-    BATCH_PROGRESS = 7
+    BATCH_SETUP = 5
+    BATCH_PROGRESS = 6
 
 
 class Session:
@@ -66,7 +66,7 @@ class Session:
         self.src_domain_admin = os.getenv("SRC_ADMIN_EMAIL", "")
         self.dst_org = None
         self.dst_domain_admin = os.getenv("DST_ADMIN_EMAIL", "")
-        self.migrator = Migrator(max_concurrent=20)
+        self.migrator = Migrator(max_concurrent=30)
         ui.timer(1, self.render_footer.refresh)
         self.user_settings = {
             "allow_downloads": False,
@@ -88,8 +88,6 @@ class Session:
                 await self.render_single_drive_select()
             case Stage.SINGLE_PROGRESS:
                 await self.render_single_progress()
-            case Stage.SINGLE_FINISHED:
-                await self.render_single_finished()
             case Stage.BATCH_SETUP:
                 await self.render_multi_setup()
             case Stage.BATCH_PROGRESS:
@@ -128,6 +126,7 @@ class Session:
         def do_shutdown():
             ui.notify("Program Terminated")
             app.shutdown()
+
         with ui.dialog() as dialog, ui.card():
             ui.label("Are you sure you want to quit?")
             with ui.row().classes("items-center"):
@@ -140,7 +139,9 @@ class Session:
         with ui.header(elevated=True).classes("p-4 items-center justify-between"):
             with ui.row().classes("items-center gap-3"):
                 ui.icon("auto_awesome", color="white").classes("text-2xl")
-                ui.label(f"Drive Migration Wizard v{VERSION}{' (Outdated!)' if new_version_avail else ''}").classes("text-xl font-bold")
+                ui.label(
+                    f"Drive Migration Wizard v{VERSION}{' (Outdated!)' if new_version_avail else ''}"
+                ).classes("text-xl font-bold")
 
             with ui.row().classes("items-center gap-4"):
                 ui.button(
@@ -148,7 +149,9 @@ class Session:
                     on_click=lambda: ui.run_javascript(
                         'window.open("https://github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator", "_blank")'
                     ),
-                ).props(f"flat color={'red' if new_version_avail else 'white'}").tooltip("Open GitHub Repo")
+                ).props(
+                    f"flat color={'red' if new_version_avail else 'white'}"
+                ).tooltip("Open GitHub Repo")
                 ui.button(
                     icon="power_settings_new",
                     on_click=self.confirm_shutdown,
@@ -445,24 +448,49 @@ class Session:
         popup = ui.dialog()
         popup.open()
         columns = [
-            {'name':'name', 'label': 'File Name', 'field': 'name'},
-            {'name':'id', 'label': 'File UUID', 'field': 'id'},
-            {'name':'valid', 'label': 'Is Migratable', 'field': 'valid'},
-            {'name':'migrated', 'label': 'Marked Migrated', 'field': 'migrated'},
+            {"name": "name", "label": "File Name", "field": "name"},
+            {"name": "id", "label": "File UUID", "field": "id"},
+            {"name": "valid", "label": "Is Migratable", "field": "valid"},
+            {"name": "migrated", "label": "Marked Migrated", "field": "migrated"},
         ]
         with popup, ui.card().classes("w-full items-center") as card:
             ui.label("Indexing...").classes("text-lg font-bold")
-            ui.spinner(size='lg')
-            await asyncio.gather(target_person.src_user.index_personal_drive_files(), target_person.dst_user.index_personal_drive_files())
-            errors, unmigrated = target_person.src_user.personal_drive.correlate(target_person.dst_user.personal_drive.all_files)
+            ui.spinner(size="lg")
+            await asyncio.gather(
+                target_person.src_user.index_personal_drive_files(),
+                target_person.dst_user.index_personal_drive_files(),
+            )
+            errors, unmigrated = target_person.src_user.personal_drive.correlate(
+                target_person.dst_user.personal_drive.all_files
+            )
             # logger.debug(f"Finished correlation with {errors}, {unmigrated}")
             card.clear()
             if len(errors) or len(unmigrated):
-                ui.label(f"{len(errors)} Failed Files, {(len(unmigrated))} Unmigrated Files").classes("text-lg font-bold")
+                ui.label(
+                    f"{len(errors)} Failed Files, {(len(unmigrated))} Unmigrated Files"
+                ).classes("text-lg font-bold")
                 # with ui.scroll_area().classes("h-64 border p-2 w-full"), ui.column().classes("gap-1"):
-                rows = [{'name': f.name, 'id': f.id, 'valid': ("No" if f.is_invalid else "Yes"), "migrated": "Yes"} for f in errors]
-                rows.extend([{'name': f.name, 'id': f.id, 'valid': ("No" if f.is_invalid else "Yes"), "migrated": "No"} for f in unmigrated])
-                ui.table(columns=columns, rows=rows, row_key='id')
+                rows = [
+                    {
+                        "name": f.name,
+                        "id": f.id,
+                        "valid": ("No" if f.is_invalid else "Yes"),
+                        "migrated": "Yes",
+                    }
+                    for f in errors
+                ]
+                rows.extend(
+                    [
+                        {
+                            "name": f.name,
+                            "id": f.id,
+                            "valid": ("No" if f.is_invalid else "Yes"),
+                            "migrated": "No",
+                        }
+                        for f in unmigrated
+                    ]
+                )
+                ui.table(columns=columns, rows=rows, row_key="id")
             else:
                 ui.label("No Issues Found.").classes("text-lg font-bold")
             ui.button("Close", on_click=popup.close).classes("self-end")
@@ -504,7 +532,10 @@ class Session:
                         ui.label("Personal Google Drive").classes(
                             "text-md font-medium text-orange-500"
                         )
-                    with ui.button("Validate Transfer", on_click=self.personal_drive_validation_popup):
+                    with ui.button(
+                        "Validate Transfer",
+                        on_click=self.personal_drive_validation_popup,
+                    ):
                         ui.tooltip("Identify any files that have not been migrated")
                     migrate_personal_switch = ui.switch(value=True).props(
                         "color=orange"
@@ -919,13 +950,13 @@ class Session:
 
     async def render_multi_setup(self):
         user_data: list[dict] = []
-        progress = {'value': None}
+        progress = {"value": None}
         options = {"personal": True, "shared": True}
 
         async def ingest_csv(evt: events.UploadEventArguments):
             nonlocal user_data, progress
             LOOKUP_BATCH_SIZE = 5
-            progress['value'] = 0.0
+            progress["value"] = 0.0
             ui_container.refresh()
             file = await evt.file.read()
             raw = BytesIO(file)
@@ -943,12 +974,11 @@ class Session:
             logger.debug(f"Ingested DF\n{user_dataframe}")
             rows, cols = user_dataframe.shape
             if cols != 2:
-                logger.warning(
-                    f"Expected exacly 2 columns, got {cols}. Rejecting file"
-                )
+                logger.warning(f"Expected exacly 2 columns, got {cols}. Rejecting file")
                 ui.notify("Expected exacly 2 columns, got {cols}.", type="warning")
                 self.go_to(Stage.BATCH_SETUP)
                 return
+
             user_dataframe.columns = ["src", "dst"]  # override names for consistency
             user_dataframe = user_dataframe.map(
                 lambda x: x.strip() if isinstance(x, str) else x
@@ -966,13 +996,19 @@ class Session:
                 )
                 lookup_tasks.append(entry["dst_user"])
             logger.debug(f"Looking up with {len(lookup_tasks)} tasks")
-            n_batch = ceil(len(lookup_tasks)/LOOKUP_BATCH_SIZE)
+            n_batch = ceil(len(lookup_tasks) / LOOKUP_BATCH_SIZE)
             for i in range(n_batch):
-                progress['value'] = (i+1)/n_batch
+                progress["value"] = (i + 1) / n_batch
                 logger.debug(f"Looking up users; batch {i} of {n_batch}")
-                batch = lookup_tasks[LOOKUP_BATCH_SIZE*i:min(LOOKUP_BATCH_SIZE*(i+1), len(lookup_tasks))]
+                batch = lookup_tasks[
+                    LOOKUP_BATCH_SIZE * i : min(
+                        LOOKUP_BATCH_SIZE * (i + 1), len(lookup_tasks)
+                    )
+                ]
                 await asyncio.gather(*batch, return_exceptions=True)
-                await asyncio.sleep(.1) # this is hacky but I'm at the end of my wits rn
+                await asyncio.sleep(
+                    0.1
+                )  # this is hacky but I'm at the end of my wits rn
             for entry in dat:
                 src = entry.pop("src_user").result()
                 dst = entry.pop("dst_user").result()
@@ -983,7 +1019,7 @@ class Session:
                     entry["status"] = "Error"
                     logger.error(f"Failure to init {entry}, got results {src}, {dst}")
             logger.info("finished ingest")
-            progress['value'] = None
+            progress["value"] = None
             user_data = dat
             ui_container.refresh()
 
@@ -992,8 +1028,10 @@ class Session:
             container = ui.card(align_items="center").classes("w-full")
             container.clear()
             with container:
-                if progress['value'] is not None:
-                    ui.linear_progress(show_value=False, size='20px').bind_value_from(progress, 'value')
+                if progress["value"] is not None:
+                    ui.linear_progress(show_value=False, size="20px").bind_value_from(
+                        progress, "value"
+                    )
                 elif len(user_data):
                     with ui.card().classes("w-full p-6 shadow-sm"):
                         ui.aggrid(
@@ -1025,15 +1063,15 @@ class Session:
 
         async def handle_continue():
             nonlocal progress, options, user_data
-            progress['value'] = 0.0
+            progress["value"] = 0.0
             ui_container.refresh()
             if options.get("shared"):
                 tasks = []
                 for person in self.migrator.targets:
                     tasks.append(asyncio.create_task(person.generate_drive_list(True)))
-                progress['value'] = 0.5
+                progress["value"] = 0.5
                 await asyncio.gather(*tasks)
-            progress['value'] = 1.0
+            progress["value"] = 1.0
             self.migrator.init_migration(options.get("personal"), self.user_settings)
             self.go_to(Stage.BATCH_PROGRESS)
 
@@ -1206,7 +1244,9 @@ def check_github_new_version() -> bool:
     if res.status_code == 200:
         latest_version = res.json().get("tag_name", "")
         if latest_version and latest_version > VERSION:
-            logger.info(f"A new version is available on Github. ({VERSION} -> {latest_version})")
+            logger.info(
+                f"A new version is available on Github. ({VERSION} -> {latest_version})"
+            )
             return True
     return False
 
@@ -1219,10 +1259,12 @@ async def main_view():
     await session.router()
     session.footer_shell()
 
+
 def handle_exception(exception: Exception):
     # Log it to the console so you don't lose the traceback
     logger.fatal(f"Global Error Caught: {exception}")
     app.shutdown()
+
 
 if __name__ in {"__main__", "__mp_main__"}:
     # don't fork bomb in pyinstaller version
