@@ -932,7 +932,7 @@ class Migrator:
         self.targets.append(Person(src, dst))
 
     async def perform_migration(self) -> bool:
-        batch_size = 8
+        batch_size = 5
         for i in range(0, len(self.targets), batch_size):
             batch_targets = self.targets[i:i + batch_size]
             tasks = []
