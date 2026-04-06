@@ -932,21 +932,24 @@ class Migrator:
         self.targets.append(Person(src, dst))
 
     async def perform_migration(self) -> bool:
-        tasks = []
-        for person in self.targets:
-            person.set_max_download_size(self.download_file_size_limit_mb)
-            if self.migrate_personal_drive:
-                tasks.append(person.migrate_personal_drive(self.semaphore, self.transfer_semaphore, self.skip_migrated_files))
-            for drive in person.to_migrate:
-                tasks.append(person.migrate_shared_drive(drive, self.semaphore, self.transfer_semaphore, self.skip_migrated_files))
-        logger.debug(f"Prepared {len(tasks)} migration tasks.")
+        batch_size = 8
+        for i in range(0, len(self.targets), batch_size):
+            batch_targets = self.targets[i:i + batch_size]
+            tasks = []
+            for person in batch_targets:
+                person.set_max_download_size(self.download_file_size_limit_mb)
+                if self.migrate_personal_drive:
+                    tasks.append(person.migrate_personal_drive(self.semaphore, self.transfer_semaphore, self.skip_migrated_files))
+                for drive in person.to_migrate:
+                    tasks.append(person.migrate_shared_drive(drive, self.semaphore, self.transfer_semaphore, self.skip_migrated_files))
+            logger.debug(f"Prepared {len(tasks)} migration tasks for batch {i // batch_size + 1}.")
 
-        ret = await asyncio.gather(*tasks, return_exceptions=True)
-        logger.debug("Migration tasks completed.")
-        for r in ret:
-            if isinstance(r, Exception):
-                logger.error(f"Migration task failed with error: {r}")
-                raise r
+            ret = await asyncio.gather(*tasks, return_exceptions=True)
+            logger.debug(f"Migration batch {i // batch_size + 1} completed.")
+            for r in ret:
+                if isinstance(r, Exception):
+                    logger.error(f"Migration task failed with error: {r}")
+                    raise r
         return True
 
     def init_migration(self, migrate_personal_drive: bool, global_options: dict):
