@@ -28,7 +28,7 @@ from icon import get_icon_base64
 
 load_dotenv()
 
-VERSION = "3.0.9"
+VERSION = "3.0.11"
 # -- Configure Logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Capture everything from DEBUG level up
