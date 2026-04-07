@@ -183,7 +183,7 @@ class APIWrapper:
             self.total_errors += 1
             self.requests_since_error = 0
             if e.resp.status in [403, 429]:
-                error_reason = e.error_details[0]["reason"]
+                error_reason = e.reason if hasattr(e, 'reason') else "unknown error"
                 logger.debug(f"API Error {e.resp.status} - {error_reason}")
                 if error_reason in [
                     "rateLimitExceeded",
@@ -311,6 +311,8 @@ class Drive:
         }
 
     def build_filetree(self, files: list[dict], skip_migrated: bool):
+        self.all_files.clear()
+        self.root.clear()
         for f in files:
             newf = File(f)
             if newf.trashed or newf.is_invalid:
@@ -648,8 +650,8 @@ class Person:
                             f"Failed to copy file {file.name}, empty response from API: {resp}"
                         )
                         raise UnknownAPIError("Empty response from API")
-                except (FileNotFoundError, PermissionError):
-                    logger.warning(f"File Permissions haven't taken effect yet for {file.id}, retrying...")
+                except (FileNotFoundError, PermissionError, g_api_errors.HttpError) as e:
+                    logger.warning(f"File Permissions haven't taken effect yet for {file.id} due to {e}, retrying...")
                     continue
                 except MigratorError as e:
                     logger.error(
@@ -660,6 +662,7 @@ class Person:
                     #remove share no matter what
                     if permission_id:
                         await self.src_user.remove_share(file.id, permission_id)
+                        permission_id = None
                 try:
                     await api(
                         self.src_user.drive_service.files().update,
@@ -756,7 +759,7 @@ class Person:
     async def folder_build_migration_tasks(self, folder: File, parent_id: str | None, src_drive: Drive, sem: asyncio.Semaphore, sem_heavy: asyncio.Semaphore) -> list:
         """Recursively creates folders and schedules file copies."""
         if not self.run:
-            return
+            return []
         new_folder_body = {
             "name": folder.name,
             "mimeType": folder.mime_type,
@@ -777,7 +780,7 @@ class Person:
                 f"Failed to create folder {folder.name} in drive {src_drive.name}"
             )
             src_drive.failed_files.append(folder)
-            return
+            return []
         src_drive.bip()
         tasks = []
         for child in folder.children:
