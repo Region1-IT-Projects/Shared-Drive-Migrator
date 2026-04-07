@@ -147,7 +147,7 @@ class Session:
                 ui.button(
                     icon="code",
                     on_click=lambda: ui.run_javascript(
-                        'window.open("https://github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator", "_blank")'
+                        'window.open("https://github.com/Region1-IT-Projects/Shared-Drive-Migrator", "_blank")'
                     ),
                 ).props(
                     f"flat color={'red' if new_version_avail else 'white'}"
