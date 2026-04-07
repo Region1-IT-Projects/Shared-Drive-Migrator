@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Capture everything from DEBUG level up
 log_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.DEBUG)  # Only show INFO+ in console
+console_handler.setLevel(logging.INFO)  # Only show INFO+ in console
 console_handler.setFormatter(log_format)
 with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".log") as logfile:
     log_path = logfile.name
@@ -147,7 +147,7 @@ class Session:
                 ui.button(
                     icon="code",
                     on_click=lambda: ui.run_javascript(
-                        'window.open("https://github.com/repos/Region1-IT-Projects/Shared-Drive-Migrator", "_blank")'
+                        'window.open("https://github.com/Region1-IT-Projects/Shared-Drive-Migrator", "_blank")'
                     ),
                 ).props(
                     f"flat color={'red' if new_version_avail else 'white'}"
@@ -974,8 +974,8 @@ class Session:
             logger.debug(f"Ingested DF\n{user_dataframe}")
             rows, cols = user_dataframe.shape
             if cols != 2:
-                logger.warning(f"Expected exacly 2 columns, got {cols}. Rejecting file")
-                ui.notify("Expected exacly 2 columns, got {cols}.", type="warning")
+                logger.warning(f"Expected exactly 2 columns, got {cols}. Rejecting file")
+                ui.notify("Expected exactly 2 columns, got {cols}.", type="warning")
                 self.go_to(Stage.BATCH_SETUP)
                 return
 
