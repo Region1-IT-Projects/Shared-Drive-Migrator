@@ -974,8 +974,8 @@ class Session:
             logger.debug(f"Ingested DF\n{user_dataframe}")
             rows, cols = user_dataframe.shape
             if cols != 2:
-                logger.warning(f"Expected exacly 2 columns, got {cols}. Rejecting file")
-                ui.notify("Expected exacly 2 columns, got {cols}.", type="warning")
+                logger.warning(f"Expected exactly 2 columns, got {cols}. Rejecting file")
+                ui.notify("Expected exactly 2 columns, got {cols}.", type="warning")
                 self.go_to(Stage.BATCH_SETUP)
                 return
 
