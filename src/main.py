@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Capture everything from DEBUG level up
 log_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.DEBUG)  # Only show INFO+ in console
+console_handler.setLevel(logging.INFO)  # Only show INFO+ in console
 console_handler.setFormatter(log_format)
 with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".log") as logfile:
     log_path = logfile.name
