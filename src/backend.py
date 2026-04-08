@@ -510,7 +510,7 @@ class User:
 
     async def remove_all_shares(self):
         tasks = []
-        for perm_id, obj_id in list(self.outstanding_shares.items()):
+        for perm_id, obj_id in set(self.outstanding_shares.items()):
             tasks.append(self.remove_share(obj_id, perm_id))
         await asyncio.gather(*tasks, return_exceptions=False)
 

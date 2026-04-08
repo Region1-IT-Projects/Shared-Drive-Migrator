@@ -28,7 +28,7 @@ from icon import get_icon_base64
 
 load_dotenv()
 
-VERSION = "3.0.11"
+VERSION = "3.0.12"
 # -- Configure Logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Capture everything from DEBUG level up
@@ -1263,6 +1263,9 @@ async def main_view():
 def handle_exception(exception: Exception):
     # Log it to the console so you don't lose the traceback
     logger.fatal(f"Global Error Caught: {exception}")
+    input(
+        "Press Enter to exit...\n"
+    )
     app.shutdown()
 
 
