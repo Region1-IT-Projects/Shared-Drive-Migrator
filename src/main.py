@@ -68,7 +68,7 @@ class Session:
         self.user_settings = {
             "allow_downloads": False,
             "max_size": 500,
-            "skip_migrated": True,
+            "skip_migrated": False,
         }
         logger.debug(f"Created new session {self.id}")
 
@@ -948,7 +948,7 @@ class Session:
     async def render_multi_setup(self):
         user_data: list[dict] = []
         progress = {"value": None}
-        options = {"personal": True, "shared": True}
+        options = {"personal": True, "shared": True, "use_successors": False}
 
         async def ingest_csv(evt: events.UploadEventArguments):
             nonlocal user_data, progress
@@ -1075,6 +1075,13 @@ class Session:
                     tasks.append(asyncio.create_task(person.generate_drive_list(True)))
                 progress["value"] = 0.5
                 await asyncio.gather(*tasks)
+                
+                if options.get("use_successors") and not self.user_settings.get("skip_migrated", True):
+                    for person in self.migrator.targets:
+                        for drive in person.to_migrate:
+                            if hasattr(drive, "possible_successors") and drive.possible_successors:
+                                drive.set_successor(drive.possible_successors[0])
+
             progress["value"] = 1.0
             self.migrator.init_migration(options.get("personal"), self.user_settings)
             self.go_to(Stage.BATCH_PROGRESS)
@@ -1086,6 +1093,11 @@ class Session:
                 with ui.row().classes("w-full items-center justify-center gap-4"):
                     ui.switch("Personal Drives").bind_value(options, "personal")
                     ui.switch("Team Drives").bind_value(options, "shared")
+                with ui.row().classes("w-full items-center justify-center gap-4"):
+                    succ_switch = ui.switch("Use existing successor drives").bind_value(options, "use_successors")
+                    succ_switch.bind_enabled_from(self.user_settings, "skip_migrated", backward=lambda x: not x)
+                    with ui.icon("info", size="sm").classes("text-gray-400 cursor-help"):
+                        ui.tooltip("When Skip Migrated is disabled, this forces the system to reuse an existing successor drive instead of spinning up a fresh one.")
                 with ui.row().classes("w-full items-center justify-center gap-4"):
                     ui.button(
                         "Back", on_click=lambda: self.go_to(Stage.MODE_SELECT)
