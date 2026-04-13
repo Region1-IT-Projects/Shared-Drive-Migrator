@@ -30,22 +30,20 @@ load_dotenv()
 
 VERSION = "3.0.12"
 # -- Configure Logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # Capture everything from DEBUG level up
 log_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)  # Only show INFO+ in console
+console_handler.setLevel(logging.DEBUG)  # Only show INFO+ in console
 console_handler.setFormatter(log_format)
 with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".log") as logfile:
     log_path = logfile.name
 file_handler = logging.FileHandler(log_path)
 file_handler.setLevel(logging.DEBUG)  # Save everything (DEBUG+) to file
 file_handler.setFormatter(log_format)
-rootlogger = logging.getLogger()
-rootlogger.addHandler(console_handler)
-rootlogger.addHandler(file_handler)
+logger = logging.getLogger()
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+logger.setLevel(logging.DEBUG)
 logging.getLogger("nicegui").setLevel(logging.WARNING)
-
 
 class Stage(Enum):
     AUTH_SETUP = 0
@@ -56,7 +54,6 @@ class Stage(Enum):
     BATCH_SETUP = 5
     BATCH_PROGRESS = 6
 
-
 class Session:
     def __init__(self):
         self.id: str = uuid.uuid4().hex
@@ -66,7 +63,7 @@ class Session:
         self.src_domain_admin = os.getenv("SRC_ADMIN_EMAIL", "")
         self.dst_org = None
         self.dst_domain_admin = os.getenv("DST_ADMIN_EMAIL", "")
-        self.migrator = Migrator(max_concurrent=30)
+        self.migrator = Migrator(max_concurrent=15)
         ui.timer(1, self.render_footer.refresh)
         self.user_settings = {
             "allow_downloads": False,
@@ -960,17 +957,24 @@ class Session:
             ui_container.refresh()
             file = await evt.file.read()
             raw = BytesIO(file)
-            match evt.file.content_type:
-                case (
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                ):
-                    user_dataframe = pd.read_excel(raw)
-                case "text/csv":
-                    user_dataframe = pd.read_csv(raw)
-                case "application/json":
-                    user_dataframe = pd.read_json(raw)
-                case _:
-                    logger.warning(f"Got unknown file type {evt.file.content_type}")
+            try:
+                match evt.file.content_type:
+                    case (
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    ):
+                        user_dataframe = pd.read_excel(raw)
+                    case "text/csv":
+                        user_dataframe = pd.read_csv(raw)
+                    case "application/json":
+                        user_dataframe = pd.read_json(raw)
+                    case _:
+                        logger.warning(f"Got unknown file type {evt.file.content_type}")
+            except ValueError as e:
+                logger.warning(f"Failed to read file: {e}")
+                ui.notify(f"Failed to read file: {e}", type="warning")
+                self.go_to(Stage.BATCH_SETUP)
+                return
+
             logger.debug(f"Ingested DF\n{user_dataframe}")
             rows, cols = user_dataframe.shape
             if cols != 2:
@@ -1056,7 +1060,7 @@ class Session:
                         label="Accounts File",
                         auto_upload=True,
                         on_upload=ingest_csv,
-                    ).props('flat bordered accept=".csv,.xlsx,.json"')
+                    ).props('flat bordered accept=".csv,.xlsx"')
                     ui.label(
                         "Upload a file listing source and destination accounts. Acceptable formats are: Excel, CSV, and json."
                     ).classes("text-xs text-grey-500")
