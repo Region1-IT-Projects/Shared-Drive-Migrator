@@ -42,6 +42,8 @@ mime_map = {
     "application/vnd.google-apps.drawing": "image/jpeg",
     "application/vnd.google-apps.jam": "application/pdf",
 }
+_shared_thread_local = threading.local()
+
 class ThreadLocalHttp:
     def __init__(self, credentials):
         self.credentials = credentials
@@ -49,11 +51,11 @@ class ThreadLocalHttp:
 
     def request(self, *args, **kwargs):
         if not hasattr(self._local, "http"):
-            # Create a clean httplib2 instance
-            base_http = httplib2.Http()
+            if not hasattr(_shared_thread_local, "base_http"):
+                _shared_thread_local.base_http = httplib2.Http()
             # Wrap it with credentials so it handles Auth headers automatically
             self._local.http = google_auth_httplib2.AuthorizedHttp(
-                self.credentials, http=base_http
+                self.credentials, http=_shared_thread_local.base_http
             )
         return self._local.http.request(*args, **kwargs)
 
