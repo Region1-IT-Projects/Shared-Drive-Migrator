@@ -28,7 +28,7 @@ from icon import get_icon_base64
 
 load_dotenv()
 
-VERSION = "3.0.12"
+VERSION = "3.1.0"
 # -- Configure Logging
 log_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 console_handler = logging.StreamHandler(sys.stdout)

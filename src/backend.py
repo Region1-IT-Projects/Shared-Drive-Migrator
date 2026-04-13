@@ -652,7 +652,7 @@ class Person:
                             f"Failed to copy file {file.name}, empty response from API: {resp}"
                         )
                         raise UnknownAPIError("Empty response from API")
-                except (FileNotFoundError, PermissionError, g_api_errors.HttpError) as e:
+                except (FileNotFoundError, PermissionError, g_api_errors.HttpError, ObjectNotFoundError, GooglePermissionError) as e:
                     logger.warning(f"File Permissions haven't taken effect yet for {file.id} due to {e}, retrying...")
                     continue
                 except MigratorError as e:
@@ -753,8 +753,8 @@ class Person:
             logger.warning(f"Failed online migration of {file.name}, attempting offline method")
             try:
                 await self._offline_copy_file(file, parent_id, sem_heavy)
-            except MigratorError:
-                logging.error(f"Both methods of copying file {file.name} failed!")
+            except Exception as e:
+                logging.error(f"Both methods of copying file {file.name} failed! Offline error: {e}")
                 src_drive.failed_files.append(file)
         src_drive.bip()
 
@@ -842,7 +842,7 @@ class Person:
         tasks = []
         for f in drive.root:
             if f.is_folder:
-                tasks.append(self.folder_build_migration_tasks(f, new_drive.id, drive, sem, sem_heavy))
+                tasks.extend(await self.folder_build_migration_tasks(f, new_drive.id, drive, sem, sem_heavy))
             else:
                 tasks.append(self.copy_file(f, new_drive.id, drive, sem, sem_heavy))
 
