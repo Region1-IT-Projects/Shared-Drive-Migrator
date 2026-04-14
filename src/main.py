@@ -68,7 +68,7 @@ class Session:
         self.user_settings = {
             "allow_downloads": False,
             "max_size": 500,
-            "skip_migrated": False,
+            "skip_migrated": True,
         }
         logger.debug(f"Created new session {self.id}")
 
@@ -1076,7 +1076,7 @@ class Session:
                 progress["value"] = 0.5
                 await asyncio.gather(*tasks)
                 
-                if options.get("use_successors") and not self.user_settings.get("skip_migrated", True):
+                if options.get("use_successors"):
                     for person in self.migrator.targets:
                         for drive in person.to_migrate:
                             if hasattr(drive, "possible_successors") and drive.possible_successors:
@@ -1094,8 +1094,7 @@ class Session:
                     ui.switch("Personal Drives").bind_value(options, "personal")
                     ui.switch("Team Drives").bind_value(options, "shared")
                 with ui.row().classes("w-full items-center justify-center gap-4"):
-                    succ_switch = ui.switch("Use existing successor drives").bind_value(options, "use_successors")
-                    succ_switch.bind_enabled_from(self.user_settings, "skip_migrated", backward=lambda x: not x)
+                    ui.switch("Use existing successor drives").bind_value(options, "use_successors")
                     with ui.icon("info", size="sm").classes("text-gray-400 cursor-help"):
                         ui.tooltip("When Skip Migrated is disabled, this forces the system to reuse an existing successor drive instead of spinning up a fresh one.")
                 with ui.row().classes("w-full items-center justify-center gap-4"):
